@@ -37,7 +37,7 @@ import io.rebble.libpebblecommon.connection.PebbleProtocolStreams
 import io.rebble.libpebblecommon.connection.PebbleSocketIdentifier
 import io.rebble.libpebblecommon.connection.PlatformIdentifier
 import io.rebble.libpebblecommon.connection.RealConnectionFailureHandler
-import io.rebble.libpebblecommon.connection.RealCreatePlatformIdentifier
+import io.rebble.libpebblecommon.connection.platformCreatePlatformIdentifier
 import io.rebble.libpebblecommon.connection.RealPebbleConnector
 import io.rebble.libpebblecommon.connection.RealPebbleProtocolHandler
 import io.rebble.libpebblecommon.connection.RealScanning
@@ -68,8 +68,9 @@ import io.rebble.libpebblecommon.connection.bt.ble.ppog.PPoGPacketSender
 import io.rebble.libpebblecommon.connection.bt.ble.ppog.PPoGStream
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattConnector
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattServerManager
+import io.rebble.libpebblecommon.connection.bt.ble.BlePlatformConfig
 import io.rebble.libpebblecommon.connection.bt.ble.transport.bleScanner
-import io.rebble.libpebblecommon.connection.bt.ble.transport.impl.KableGattConnector
+import io.rebble.libpebblecommon.connection.bt.ble.transport.libpebbleGattConnector
 import io.rebble.libpebblecommon.connection.bt.classic.pebble.PebbleBtClassic
 import io.rebble.libpebblecommon.connection.qemu.QemuTransport
 import io.rebble.libpebblecommon.connection.devconnection.CloudpebbleProxyProtocolVersion
@@ -355,7 +356,15 @@ fun initKoin(
     proxyTokenProvider: StateFlow<String?>,
     transcriptionProvider: TranscriptionProvider,
     injectedPKJSHttpInterceptors: InjectedPKJSHttpInterceptors,
-    pluginOAuthApi: PluginOAuthApi? = null,
+    /**
+     * Bindings that replace [platformModule]'s defaults. [platformModule] is an `expect`/`actual`,
+     * so only this module can ever supply one — a downstream consumer (a distro's daemon, say)
+     * has no way to. This is the seam for those: bind what you improve on, inherit the rest.
+     *
+     * Applied as separate later entries in [Koin.loadModules], which overrides by default, rather
+     * than via `includes` — precedence between sibling modules in the list is well-defined.
+     */
+    platformOverrides: List<Module> = emptyList(),
 ): Koin {
     val koin = LibPebbleKoinContext.koin
     val libPebbleScope = LibPebbleCoroutineScope(CoroutineName("libpebble3"))
@@ -461,7 +470,7 @@ fun initKoin(
                     )
                 } bind LibPebble::class
                 single { RealConnectionScopeFactory(koin) } bind ConnectionScopeFactory::class
-                singleOf(::RealCreatePlatformIdentifier) bind CreatePlatformIdentifier::class
+                single<CreatePlatformIdentifier> { platformCreatePlatformIdentifier(get(), get()) }
                 singleOf(::GattServerManager)
                 singleOf(::NotificationApi) bind NotificationApps::class
                 singleOf(::RealBluetoothStateProvider) bind BluetoothStateProvider::class
@@ -555,14 +564,16 @@ fun initKoin(
                     scoped { get<ConnectionScopeProperties>().platformIdentifier as PlatformIdentifier.BlePlatformIdentifier }
 
                     // Connection
-                    scopedOf(::KableGattConnector)
                     scopedOf(::PebbleBle)
                     scopedOf(::PebbleBtClassic)
                     scopedOf(::QemuTransport)
                     scopedOf(::RealConnectionAnalyticsLogger) bind ConnectionAnalyticsLogger::class
                     scoped<GattConnector> {
                         when (val id = get<PebbleIdentifier>()) {
-                            is PebbleBleIdentifier -> get<KableGattConnector>()
+                            is PebbleBleIdentifier -> {
+                                val props = get<ConnectionScopeProperties>()
+                                libpebbleGattConnector(id, props.platformIdentifier, props.scope, get<BlePlatformConfig>())
+                            }
                             is PebbleBtClassicIdentifier -> error("BT Classic does not use GATT: $id")
                             else -> error("GATT not implemented for: $id")
                         }
@@ -668,7 +679,7 @@ fun initKoin(
                     //  - fully connected = has WatchInfo (more useful)
                 }
             }
-        )
+        ) + platformOverrides
     )
     return koin
 }
