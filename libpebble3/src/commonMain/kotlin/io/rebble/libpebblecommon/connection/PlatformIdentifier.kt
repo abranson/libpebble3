@@ -6,6 +6,7 @@ import io.rebble.libpebblecommon.connection.bt.ble.BlePlatformConfig
 import io.rebble.libpebblecommon.connection.bt.ble.transport.impl.peripheralFromIdentifier
 
 sealed class PlatformIdentifier {
+    data class BluezBlePlatformIdentifier(val identifier: PebbleBleIdentifier) : PlatformIdentifier()
     data class BlePlatformIdentifier(val peripheral: Peripheral, val autoConnect: Boolean) : PlatformIdentifier()
     data class SocketPlatformIdentifier(val addr: String) : PlatformIdentifier()
     data class BtClassicPlatformIdentifier(val identifier: PebbleBtClassicIdentifier) : PlatformIdentifier()
@@ -19,6 +20,8 @@ interface CreatePlatformIdentifier {
         lastAttemptFailed: Boolean,
     ): PlatformIdentifier?
 }
+
+expect fun platformCreatePlatformIdentifier(bleConfig: BleConfigFlow, blePlatformConfig: BlePlatformConfig): CreatePlatformIdentifier
 
 class RealCreatePlatformIdentifier(
     private val bleConfig: BleConfigFlow,

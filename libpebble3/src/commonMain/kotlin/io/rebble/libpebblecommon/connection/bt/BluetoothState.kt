@@ -1,6 +1,5 @@
 package io.rebble.libpebblecommon.connection.bt
 
-import com.juul.kable.Bluetooth
 import io.rebble.libpebblecommon.connection.AppContext
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +26,13 @@ enum class BluetoothState {
 
 expect fun nativeBluetoothStateFlow(appContext: AppContext): Flow<BluetoothState>?
 
+/**
+ * Whether BLE scanning prerequisites are met. Backed by Kable's availability API on
+ * android/ios (covers e.g. Android <12 location-services requirement); adapter power
+ * state on jvm/Linux.
+ */
+internal expect fun bluetoothAvailabilityFlow(appContext: AppContext): Flow<Boolean>
+
 class RealBluetoothStateProvider(
     private val libPebbleCoroutineScope: LibPebbleCoroutineScope,
     private val appContext: AppContext,
@@ -40,8 +46,7 @@ class RealBluetoothStateProvider(
     override fun init() {
         val nativeFlow = nativeBluetoothStateFlow(appContext)
         libPebbleCoroutineScope.launch {
-            Bluetooth.availability.collect {
-                val available = it is Bluetooth.Availability.Available
+            bluetoothAvailabilityFlow(appContext).collect { available ->
                 _scanningAvailable.value = available
                 if (nativeFlow == null) {
                     _state.value = if (available) BluetoothState.Enabled else BluetoothState.Disabled
