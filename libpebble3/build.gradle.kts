@@ -70,6 +70,8 @@ kotlin {
         }
     }
 
+    // Generic-Linux library target. The daemon entrypoint (fun main) and its dist packaging live
+    // in the :libpebble3d-sailfish module.
     jvm()
 
     listOf(
@@ -145,6 +147,23 @@ kotlin {
         }
 
         jvmMain.dependencies {
+            // Linux desktop GATT server + pairing/adapter state over BlueZ D-Bus.
+            // (Kable's JVM/btleplug backend for the central role comes transitively via libs.kable.)
+            implementation(libs.bluez.dbus)
+            // HttpClient() engine for the JVM target (android uses OkHttp, ios uses Darwin).
+            implementation(libs.ktor.cio)
+            // Client-side WebSockets plugin for the PKJS WebSocketManager (mirrors iosMain).
+            implementation(libs.ktor.websockets)
+            // dbus-java discovers its transport via ServiceLoader; without this module every
+            // D-Bus connection fails with TransportRegistrationException.
+            implementation("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.0")
+            // dbus-java logs internal errors (e.g. signal demarshalling failures in its
+            // receiver threads) via slf4j; without a backend those vanish into the NOP logger.
+            implementation("org.slf4j:slf4j-simple:2.0.16")
+            // PKJS runtime: GraalJS (Truffle) — embedded in the GraalVM native image;
+            // interpreted (slow but fine) when running on a stock JVM.
+            implementation("org.graalvm.polyglot:polyglot:25.0.0")
+            implementation("org.graalvm.polyglot:js-community:25.0.0")
         }
 
         jvmTest.dependencies {
@@ -169,6 +188,7 @@ kotlin {
     }
 }
 
+
 // Otherwise it doesn't trigger our blobdbgen processor when compiling code
 // https://github.com/google/ksp/issues/567
 tasks.withType<KotlinCompilationTask<*>>().all {
@@ -178,6 +198,15 @@ tasks.withType<KotlinCompilationTask<*>>().all {
 }
 
 afterEvaluate {
+    tasks.named("kspKotlinJvm") {
+        dependsOn("kspCommonMainKotlinMetadata")
+    }
+    // Room's generated jvm actual for DatabaseConstructor fails expect/actual matching
+    // (identical android codegen compiles fine — KSP/K2 quirk). Room on JVM falls back to
+    // reflectively instantiating Database_Impl, so the constructor object isn't needed.
+    tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlinJvm") {
+        exclude("**/DatabaseConstructor.kt")
+    }
     tasks.named("kspAndroidMain") {
         dependsOn("kspCommonMainKotlinMetadata")
     }
@@ -194,7 +223,8 @@ afterEvaluate {
 
 dependencies {
 //    add("kspCommonMainMetadata", libs.room.compiler)
-//    add("kspJvm", libs.room.compiler)
+    // Room codegen for the JVM/Linux target — without this Database_Impl doesn't exist.
+    add("kspJvm", libs.room.compiler)
     add("kspCommonMainMetadata", project(":blobdbgen"))
     add("kspAndroid", libs.room.compiler)
 

@@ -1,7 +1,29 @@
 package io.rebble.libpebblecommon.di
 
+import io.rebble.libpebblecommon.js.GraalJsRunner
+import io.rebble.libpebblecommon.js.JsRunner
 import org.koin.core.module.Module
+import org.koin.dsl.bind
 import org.koin.dsl.module
 
 actual val pkjsPlatformModule: Module = module {
+    factory { params ->
+        GraalJsRunner(
+            appContext = get(),
+            libPebble = get(),
+            jsTokenUtil = get(),
+
+            device = params.get(),
+            scope = params.get(),
+            appInfo = params.get(),
+            lockerEntry = params.get(),
+            jsPath = params.get(),
+            // Two Channel<String> params resolve by array order: urlOpenRequests, logMessages.
+            urlOpenRequests = params.get(),
+            logMessages = params.get(),
+            remoteTimelineEmulator = get(),
+            httpInterceptorManager = get(),
+            notificationConfigFlow = get(),
+        )
+    } bind JsRunner::class
 }
