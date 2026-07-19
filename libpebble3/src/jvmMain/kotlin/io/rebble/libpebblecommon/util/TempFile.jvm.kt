@@ -8,5 +8,6 @@ actual fun getTempFilePath(
     name: String,
     subdir: String?,
 ): Path {
-    TODO("Not yet implemented")
+    val base = if (subdir != null) JvmPaths.cacheSubdir(subdir) else JvmPaths.cacheHome
+    return Path(base.resolve(name).toString())
 }

@@ -1,8 +1,9 @@
 package io.rebble.libpebblecommon.web
 
 import io.rebble.libpebblecommon.connection.AppContext
+import io.rebble.libpebblecommon.util.JvmPaths
 import kotlinx.io.files.Path
 
 actual fun getFirmwareDownloadDirectory(context: AppContext): Path {
-    TODO("Not yet implemented")
+    return Path(JvmPaths.cacheSubdir("firmware").toString())
 }
