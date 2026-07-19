@@ -4,6 +4,7 @@ import io.ktor.utils.io.core.toByteArray
 import io.rebble.libpebblecommon.WatchConfigFlow
 import io.rebble.libpebblecommon.connection.PKJSToken
 import io.rebble.libpebblecommon.connection.TokenProvider
+import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.database.entity.LockerEntryDao
 import io.rebble.libpebblecommon.permissions.AppPermissions
 import io.rebble.libpebblecommon.permissions.PermissionDecision
@@ -16,7 +17,7 @@ class JsTokenUtil(
     private val tokenProvider: TokenProvider,
     private val lockerEntryDao: LockerEntryDao,
     private val watchConfigFlow: WatchConfigFlow,
-    private val permissions: AppPermissions,
+    private val webServices: WebServices,
 ): PKJSToken {
     companion object {
         private const val ACCOUNT_TOKEN_SALT =
@@ -50,19 +51,17 @@ class JsTokenUtil(
     }
 
     suspend fun getTimelineToken(uuid: Uuid): String? {
-        if (permissions.request(uuid, PluginPermissions.TIMELINE, wait = true) != PermissionDecision.Granted) return null
+        // Locker apps carry their own user_token; anything else (e.g. sideloaded) falls back to a
+        // sandbox token, then to the emulator dummy if remote-timeline emulation is on.
         val realToken = lockerEntryDao.getEntry(uuid)?.appstoreData?.userToken
         val fallback = if (watchConfigFlow.value.emulateRemoteTimeline) {
             "emulated-dummy-token"
         } else {
             null
         }
-        return realToken ?: fallback
+        return realToken ?: getSandboxTimelineToken(uuid) ?: fallback
     }
 
-    suspend fun getSandboxTimelineToken(uuid: Uuid): String? {
-        //TODO: Get sandbox timeline token from API
-        //RWS.timelineClientFlow.filterNotNull().first().getSandboxUserToken(uuid.toString())
-        return null
-    }
+    suspend fun getSandboxTimelineToken(uuid: Uuid): String? =
+        webServices.getSandboxTimelineToken(uuid)
 }
