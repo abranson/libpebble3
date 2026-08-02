@@ -5,6 +5,7 @@ import com.juul.kable.ManufacturerData
 import io.rebble.libpebblecommon.connection.BleScanResult
 import io.rebble.libpebblecommon.connection.PebbleBleIdentifier
 import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezManager
+import io.rebble.libpebblecommon.connection.bt.ble.bluez.isObjectOnBluezAdapter
 import io.rebble.libpebblecommon.connection.bt.ble.transport.BleScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -64,6 +65,7 @@ internal class BluezBleScanner : BleScanner {
         val loggedQuietPebbles = ConcurrentHashMap.newKeySet<String>()
 
         fun update(path: String, props: Map<String, Variant<*>>, source: String) {
+            if (!isObjectOnBluezAdapter(path, adapter.dbusPath)) return
             val address = addressFromDevicePath(path) ?: return
             logger.v { "$source $path: ${props.keys}" }
             val state = advState.computeIfAbsent(path) { AdvState(address) }
@@ -152,7 +154,7 @@ internal class BluezBleScanner : BleScanner {
             // getDevices(false) would return bluez-dbus's populate-once cache, stale from the
             // second scan onwards.
             try {
-                dm.getDevices(true).forEach { device ->
+                BluezManager.devicesOnDefaultAdapter().forEach { device ->
                     val path = device.dbusPath ?: return@forEach
                     if (fetchRequested.add(path)) fetchRequests.trySend(path)
                 }

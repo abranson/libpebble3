@@ -4,8 +4,48 @@ import co.touchlab.kermit.Logger
 import com.github.hypfvieh.bluetooth.DeviceManager
 import com.github.hypfvieh.bluetooth.wrapper.BluetoothAdapter
 import com.github.hypfvieh.bluetooth.wrapper.BluetoothDevice
+import org.bluez.Adapter1
 import org.freedesktop.dbus.connections.impl.DBusConnection
 import org.freedesktop.dbus.messages.MethodCall
+
+private const val BLUEZ_ADAPTER_ENV = "LIBPEBBLE3_BLUEZ_ADAPTER"
+private val BLUEZ_ADAPTER_PATH_REGEX = Regex("^/org/bluez/hci[0-9]+$")
+
+internal fun isValidBluezAdapterPath(path: String): Boolean = BLUEZ_ADAPTER_PATH_REGEX.matches(path)
+
+internal fun isObjectOnBluezAdapter(objectPath: String, adapterPath: String): Boolean =
+    objectPath.startsWith("$adapterPath/")
+
+internal data class BluezAdapterCandidate(
+    val path: String,
+    val address: String,
+    val powered: Boolean,
+)
+
+/**
+ * Choose one responsive BlueZ adapter without assuming a fixed HCI index.
+ *
+ * AlienBT presents the physical controller back to Sailfish as a later virtual HCI with the same
+ * Bluetooth address.  Deduplicating equal addresses in favour of the later HCI selects that
+ * Sailfish-facing adapter, while devices without AlienBT keep their sole hci0 adapter.
+ */
+internal fun selectAutomaticBluezAdapter(candidates: List<BluezAdapterCandidate>): String? {
+    val deduplicated = candidates
+        .groupBy { it.address.uppercase() }
+        .values
+        .map { duplicateAddressAdapters ->
+            duplicateAddressAdapters.maxByOrNull { adapterIndex(it.path) }
+        }
+        .filterNotNull()
+    return deduplicated
+        .filter { it.powered }
+        .ifEmpty { deduplicated }
+        .firstOrNull()
+        ?.path
+}
+
+private fun adapterIndex(path: String): Int =
+    path.substringAfterLast("hci", missingDelimiterValue = "").toIntOrNull() ?: -1
 
 /**
  * Shared access to BlueZ over the D-Bus *system* bus for the parts of the stack that Kable's
@@ -50,11 +90,39 @@ object BluezManager {
     private var lastLoggedAdapterChoice: String? = null
 
     fun defaultAdapter(): BluetoothAdapter? = try {
-        // Don't blindly take the first adapter: phones can expose more than one HCI and
-        // the first isn't necessarily the powered/real one.
+        val configuredPath = System.getenv(BLUEZ_ADAPTER_ENV)?.trim()?.takeIf { it.isNotEmpty() }
+        if (configuredPath != null) {
+            if (!isValidBluezAdapterPath(configuredPath)) {
+                logger.e("$BLUEZ_ADAPTER_ENV has invalid adapter path: $configuredPath")
+                return null
+            }
+            val dm = deviceManagerOrNull() ?: return null
+            val rawAdapter = dm.dbusConnection.getRemoteObject(
+                "org.bluez",
+                configuredPath,
+                Adapter1::class.java,
+                false,
+            )
+            val adapter = BluetoothAdapter(rawAdapter, configuredPath, dm.dbusConnection)
+            // Validate the exact object without enumerating or querying any other adapter.
+            adapter.isPowered
+            val choice = "configured adapter=$configuredPath"
+            if (lastLoggedAdapterChoice != choice) {
+                lastLoggedAdapterChoice = choice
+                logger.i { choice }
+            }
+            return adapter
+        }
+
+        // Don't blindly take the first adapter: phones can expose more than one HCI.
         val adapters = deviceManagerOrNull()?.scanForBluetoothAdapters().orEmpty()
-        val chosen = adapters.firstOrNull { runCatching { it.isPowered }.getOrDefault(false) }
-            ?: adapters.firstOrNull()
+        val candidates = adapters.mapNotNull { adapter ->
+            val address = runCatching { adapter.address }.getOrNull() ?: return@mapNotNull null
+            val powered = runCatching { adapter.isPowered }.getOrDefault(false)
+            BluezAdapterCandidate(adapter.dbusPath, address, powered)
+        }
+        val chosenPath = selectAutomaticBluezAdapter(candidates)
+        val chosen = adapters.firstOrNull { it.dbusPath == chosenPath }
         if (chosen != null && adapters.size > 1) {
             val choice = "adapters=${adapters.map { it.dbusPath }} chose=${chosen.dbusPath}"
             if (lastLoggedAdapterChoice != choice) {
@@ -68,6 +136,22 @@ object BluezManager {
         null
     }
 
+    /** Re-introspect devices beneath only the selected adapter. */
+    fun devicesOnDefaultAdapter(): List<BluetoothDevice> {
+        val dm = deviceManagerOrNull() ?: return emptyList()
+        val adapter = defaultAdapter() ?: return emptyList()
+        return try {
+            dm.findBtDevicesByIntrospection(adapter)
+            dm.getDevices(adapter.address)
+                .filter { device ->
+                    device.dbusPath?.let { isObjectOnBluezAdapter(it, adapter.dbusPath) } == true
+                }
+        } catch (e: Throwable) {
+            logger.e("error listing devices on ${adapter.dbusPath}", e)
+            emptyList()
+        }
+    }
+
     /**
      * Addresses (uppercased) of every device BlueZ currently has bonded (Paired=true).
      *
@@ -77,10 +161,8 @@ object BluezManager {
      * set up. Blocking (re-introspects the tree); call from Dispatchers.IO.
      */
     fun bondedAddresses(): Set<String> {
-        val dm = deviceManagerOrNull() ?: return emptySet()
         return try {
-            // true => re-introspect; a cached list misses devices bonded since the first call.
-            dm.getDevices(true)
+            devicesOnDefaultAdapter()
                 .filter { runCatching { it.isPaired == true }.getOrDefault(false) }
                 .map { it.address.uppercase() }
                 .toSet()
@@ -92,12 +174,8 @@ object BluezManager {
 
     /** Find the BlueZ device wrapper for the given address (introspecting the object tree). */
     fun findDevice(address: String): BluetoothDevice? {
-        val dm = deviceManagerOrNull() ?: return null
         return try {
-            // true => re-introspect the BlueZ tree. getDevices(false) returns a cached list
-            // that bluez-dbus populates only once, so devices discovered after that first
-            // call would never become visible.
-            dm.getDevices(true).firstOrNull { it.address.equals(address, ignoreCase = true) }
+            devicesOnDefaultAdapter().firstOrNull { it.address.equals(address, ignoreCase = true) }
         } catch (e: Throwable) {
             logger.e("error finding device $address", e)
             null
@@ -157,7 +235,7 @@ object BluezManager {
             }
             // Distinguishes "watch stopped advertising" (others visible) from a wedged
             // controller RX path (tree stays empty even with devices nearby).
-            val treeSize = runCatching { deviceManagerOrNull()?.getDevices(true)?.size }.getOrNull()
+            val treeSize = runCatching { devicesOnDefaultAdapter().size }.getOrNull()
             logger.w { "$address not found after ${timeoutMs}ms discovery; BlueZ tree has $treeSize device(s)" }
             return null
         } finally {
