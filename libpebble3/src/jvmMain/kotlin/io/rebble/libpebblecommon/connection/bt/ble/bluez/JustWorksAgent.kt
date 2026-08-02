@@ -33,20 +33,30 @@ internal object BluezAgent {
     @Volatile
     private var registered = false
 
+    @Volatile
+    private var exported = false
+
     /** Export + register our auto-accept agent as the default agent. Idempotent. */
     @Synchronized
     fun ensureRegistered(): Boolean {
         if (registered) return true
         val conn = BluezManager.connection ?: return false
         return try {
-            conn.exportObject(JustWorksAgent(AGENT_PATH))
+            if (!exported) {
+                conn.exportObject(JustWorksAgent(AGENT_PATH))
+                exported = true
+            }
             val agentManager = conn.getRemoteObject(
                 "org.bluez", "/org/bluez", AgentManager1::class.java, false
             )
             agentManager.RegisterAgent(DBusPath(AGENT_PATH), "NoInputNoOutput")
-            agentManager.RequestDefaultAgent(DBusPath(AGENT_PATH))
             registered = true
-            logger.d("registered default pairing agent")
+            // Pairing initiated by this connection uses its registered agent. Becoming the
+            // system-wide default is useful for incoming requests, but some distributions reserve
+            // it for their trusted Bluetooth UI and reject this call.
+            runCatching { agentManager.RequestDefaultAgent(DBusPath(AGENT_PATH)) }
+                .onFailure { logger.w { "pairing agent registered but not default: ${it.message}" } }
+            logger.d("registered pairing agent")
             true
         } catch (e: Throwable) {
             logger.e("failed to register pairing agent", e)

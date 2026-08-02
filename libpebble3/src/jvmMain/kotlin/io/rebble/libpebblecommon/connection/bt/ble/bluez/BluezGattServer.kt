@@ -38,7 +38,7 @@ private const val DATA_CHAR_PATH = "$SERVICE_PATH/char1"
 
 private val READ_TIMEOUT = 8.seconds
 
-/** "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF" -> "AA:BB:CC:DD:EE:FF". */
+/** "/org/bluez/hci7/dev_AA_BB_CC_DD_EE_FF" -> "AA:BB:CC:DD:EE:FF". */
 internal fun deviceAddressFromPath(path: String?): String? {
     if (path == null) return null
     val marker = path.substringAfterLast("dev_", missingDelimiterValue = "")

@@ -9,6 +9,7 @@ import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezManager
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.ConnectivityWatcher
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.LEConstants
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
+import io.rebble.libpebblecommon.linux.dbus.RawSessionConnection
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
@@ -29,6 +30,9 @@ actual fun isBonded(identifier: PebbleBleIdentifier): Boolean {
 
 actual fun createBond(identifier: PebbleBleIdentifier): Boolean {
     logger.d("createBond($identifier)")
+    if (requestPlatformPairing(identifier)) {
+        return true
+    }
     BluezAgent.ensureRegistered()
     BluezManager.defaultAdapter()?.let {
         try {
@@ -54,6 +58,32 @@ actual fun createBond(identifier: PebbleBleIdentifier): Boolean {
         paired
     } catch (e: Throwable) {
         logger.e("createBond failed for $identifier", e)
+        false
+    }
+}
+
+/**
+ * Some Linux platforms deliberately reserve BlueZ's pairing methods for a small trusted broker.
+ * Keep the generic daemon unprivileged and delegate only the typed pair request when the platform
+ * package explicitly selects a supported broker.
+ */
+private fun requestPlatformPairing(identifier: PebbleBleIdentifier): Boolean {
+    if (System.getenv(PAIRING_BROKER_ENV) != SAILFISH_LIPSTICK_BROKER) {
+        return false
+    }
+    return try {
+        RawSessionConnection.connect()?.use { conn ->
+            conn.callWithReply(
+                "com.jolla.lipstick",
+                "/bluetooth",
+                "com.jolla.lipstick",
+                "pairWithDevice",
+                "s",
+                identifier.asString,
+            ) != null
+        } ?: false
+    } catch (e: Throwable) {
+        logger.e("platform pairing broker failed for ${identifier.asString}", e)
         false
     }
 }
@@ -102,3 +132,6 @@ actual fun getBluetoothClassicDevicePairEvents(
 ): Flow<BluetoothClassicDevicePairEvent> {
     throw UnsupportedOperationException("BT Classic not supported on JVM")
 }
+
+private const val PAIRING_BROKER_ENV = "LIBPEBBLE3D_BLUEZ_PAIRING_BROKER"
+private const val SAILFISH_LIPSTICK_BROKER = "sailfish-lipstick"
