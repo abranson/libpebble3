@@ -440,9 +440,27 @@ sealed class FirmwareUpdateCheckResult {
 interface Calendar {
     fun calendars(): Flow<List<CalendarEntity>>
     fun updateCalendarEnabled(calendarId: Int, enabled: Boolean)
-    suspend fun createEvent(calendarId: Int, event: NewCalendarEvent): String?
-    /** The synced calendar matching the platform's default for new events, if known. */
-    suspend fun defaultCalendar(): CalendarEntity?
+
+    /**
+     * Reconcile one complete platform-calendar snapshot into the durable Timeline projection.
+     * Completion does not imply that a disconnected watch has acknowledged the resulting BlobDB
+     * records; normal BlobDB delivery resumes when that watch is connected.
+     */
+    suspend fun syncCalendars(beginCommit: () -> Boolean = { true }): CalendarSyncOutcome
+
+    /** Create an event in the device's primary/default calendar. Returns the new event id, or null. */
+    suspend fun createEvent(event: NewCalendarEvent): String?
+}
+
+sealed interface CalendarSyncOutcome {
+    data class Completed(
+        val calendarCount: Int,
+        val eventCount: Int,
+        val reminderCount: Int,
+        val calendarEnabled: Boolean,
+    ) : CalendarSyncOutcome
+
+    data object SourceUnavailable : CalendarSyncOutcome
 }
 
 fun PebbleDevices.forDevice(identifier: String): Flow<PebbleDevice> {
