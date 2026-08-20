@@ -19,7 +19,17 @@ class PhoneAppLogMessage(
     message: String
 ): StructMappable() {
     val type = SByte(m, ServerMessageType.PhoneAppLog.value)
-    val message = SFixedString(m, message.length, message)
+    val message = SFixedString(m, message.encodeToByteArray().size, message)
+}
+
+class PhoneInfoMessage : StructMappable() {
+    val type = SByte(m, ServerMessageType.PhoneInfo.value)
+    val info = SFixedString(m, INFO.encodeToByteArray().size, INFO)
+
+    companion object {
+        // Kept byte-for-byte compatible with the legacy developer connection.
+        const val INFO = "rocpoold,1.5.0,pebble"
+    }
 }
 
 class InstallStatusMessage(

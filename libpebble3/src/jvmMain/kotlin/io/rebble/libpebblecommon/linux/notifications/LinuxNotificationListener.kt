@@ -5,11 +5,14 @@ import io.rebble.libpebblecommon.SystemAppIDs.ANDROID_NOTIFICATIONS_UUID
 import io.rebble.libpebblecommon.connection.LibPebble
 import io.rebble.libpebblecommon.database.asMillisecond
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
+import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.entity.MuteState
 import io.rebble.libpebblecommon.database.entity.NotificationAppItem
 import io.rebble.libpebblecommon.database.entity.TimelineNotification
 import io.rebble.libpebblecommon.database.entity.buildTimelineNotification
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
+import io.rebble.libpebblecommon.NotificationConfigFlow
+import io.rebble.libpebblecommon.linux.LinuxDeviceActivity
 import io.rebble.libpebblecommon.notification.NotificationListenerConnection
 import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
 import io.rebble.libpebblecommon.util.toPebbleColor
@@ -23,41 +26,117 @@ import kotlin.uuid.Uuid
 sealed class WatchAction {
     data object Dismiss : WatchAction()
     data object MuteApp : WatchAction()
-    data class Remote(val action: RemoteAction) : WatchAction()
+    data object Open : WatchAction()
 }
 
 data class ActiveNotification(
     val itemId: Uuid,
-    val dbusId: UInt,
+    val notificationId: String,
     val packageName: String,
     val title: String,
     val body: String,
     val actions: List<WatchAction>,
 )
 
+internal class ActiveNotificationTracker(
+    private val maximumTracked: Int = 200,
+) {
+    private val lock = Any()
+    private val byItemId = LinkedHashMap<Uuid, ActiveNotification>()
+    private val byNotificationId = HashMap<String, Uuid>()
+
+    fun active(itemId: Uuid): ActiveNotification? = synchronized(lock) { byItemId[itemId] }
+
+    fun replacement(notificationId: String?): ActiveNotification? = synchronized(lock) {
+        notificationId?.let { byNotificationId[it] }?.let { byItemId[it] }
+    }
+
+    fun remap(itemId: Uuid, expectedId: String, newId: String) = synchronized(lock) {
+        val current = byItemId[itemId]
+        if (current != null && current.notificationId == expectedId) {
+            byNotificationId.remove(expectedId, itemId)
+            byNotificationId.put(newId, itemId)?.takeIf { it != itemId }?.let(byItemId::remove)
+            byItemId[itemId] = current.copy(notificationId = newId)
+        }
+    }
+
+    fun track(active: ActiveNotification) = synchronized(lock) {
+        byItemId.put(active.itemId, active)?.let { previous ->
+            byNotificationId.remove(previous.notificationId, previous.itemId)
+        }
+        byNotificationId.put(active.notificationId, active.itemId)
+            ?.takeIf { it != active.itemId }
+            ?.let(byItemId::remove)
+        while (byItemId.size > maximumTracked) {
+            val oldest = byItemId.keys.first()
+            removeLocked(oldest)
+        }
+    }
+
+    fun remove(itemId: Uuid): ActiveNotification? = synchronized(lock) { removeLocked(itemId) }
+
+    fun close(notificationId: String): Uuid? = synchronized(lock) {
+        val itemId = byNotificationId[notificationId] ?: return@synchronized null
+        removeLocked(itemId)
+        itemId
+    }
+
+    fun clear(): List<Uuid> = synchronized(lock) {
+        val ids = byItemId.keys.toList()
+        byItemId.clear()
+        byNotificationId.clear()
+        ids
+    }
+
+    fun removePackages(packageNames: Set<String>): List<Uuid> = synchronized(lock) {
+        val ids = byItemId.values
+            .filter { it.packageName in packageNames }
+            .map(ActiveNotification::itemId)
+        ids.forEach(::removeLocked)
+        ids
+    }
+
+    private fun removeLocked(itemId: Uuid): ActiveNotification? =
+        byItemId.remove(itemId)?.also { active ->
+            byNotificationId.remove(active.notificationId, itemId)
+        }
+}
+
 /**
- * Feeds freedesktop notifications into libpebble3, via [NotificationMonitor] for the raw D-Bus
- * traffic and a [NotificationHintMapper] for the desktop-specific parts.
+ * Feeds native-Linux notifications into libpebble3. The injected backend may
+ * use freedesktop D-Bus directly or a distro-specific native provider.
  */
 class LinuxNotificationListener(
     private val scope: LibPebbleCoroutineScope,
     private val notificationAppDao: NotificationAppRealDao,
-    private val hintMapper: NotificationHintMapper,
+    private val timelineNotificationDao: TimelineNotificationRealDao,
+    private val backend: LinuxNotificationBackend,
+    private val notificationConfig: NotificationConfigFlow,
+    private val deviceActivity: LinuxDeviceActivity,
 ) : NotificationListenerConnection {
     private val logger = Logger.withTag("LinuxNotificationListener")
-    private val monitor = NotificationMonitor()
 
-    private val lock = Any()
-    private val byItemId = LinkedHashMap<Uuid, ActiveNotification>()
-    private val byDbusId = HashMap<UInt, Uuid>()
+    private val tracker = ActiveNotificationTracker()
 
     override fun init(libPebble: LibPebble) {
         scope.launch {
-            monitor.events().collect { event ->
+            try {
+                retirePersistedNotifications(libPebble)
+            } catch (e: Exception) {
+                logger.e("could not retire stale native notifications", e)
+            }
+            backend.events().collect { event ->
                 try {
                     when (event) {
-                        is NotificationEvent.Posted -> onPosted(libPebble, event.notification)
-                        is NotificationEvent.Closed -> onClosed(libPebble, event.id)
+                        is LinuxNotificationEvent.Posted ->
+                            onPosted(libPebble, event.notification)
+                        is LinuxNotificationEvent.Closed -> onClosed(libPebble, event.id)
+                        is LinuxNotificationEvent.SourcesChanged -> try {
+                            onSourcesChanged(libPebble, event.packageNames)
+                        } finally {
+                            event.applied.complete(Unit)
+                        }
+                        LinuxNotificationEvent.Reset -> onReset(libPebble)
                     }
                 } catch (e: Exception) {
                     logger.e("error handling $event", e)
@@ -67,21 +146,44 @@ class LinuxNotificationListener(
     }
 
     fun activeNotification(itemId: Uuid): ActiveNotification? =
-        synchronized(lock) { byItemId[itemId] }
+        tracker.active(itemId)
 
     fun remove(itemId: Uuid) {
-        synchronized(lock) {
-            byItemId.remove(itemId)?.let { byDbusId.remove(it.dbusId) }
+        tracker.remove(itemId)
+    }
+
+    private suspend fun retirePersistedNotifications(libPebble: LibPebble) {
+        val stale = timelineNotificationDao
+            .getNotificationsForParent(ANDROID_NOTIFICATIONS_UUID)
+            .filter { TimelineItem.Flag.STATE_READ !in it.content.flags }
+        stale.forEach { libPebble.markNotificationRead(it.itemId) }
+        if (stale.isNotEmpty()) {
+            logger.i { "retired ${stale.size} native notifications after restart" }
         }
     }
 
-    private suspend fun onPosted(libPebble: LibPebble, n: DBusNotification) {
-        val mapped = hintMapper.map(n) ?: return
-
-        val replaced = n.replacesId.takeIf { it != 0u }
-            ?.let { synchronized(lock) { byDbusId[it]?.let { id -> byItemId[id] } } }
-        if (replaced != null && replaced.title == mapped.title && replaced.body == mapped.body) {
+    private suspend fun onPosted(libPebble: LibPebble, n: LinuxNotification) {
+        val mapped = n.content
+        val replaced = tracker.replacement(n.replacesId)
+        if (!notificationConfig.value.alwaysSendNotifications &&
+            !mapped.isPebbleTestNotification() && deviceActivity.isActiveAndUnlocked()
+        ) {
+            // Replacing a visible pin with a suppressed native notification must
+            // still retire the old pin. The new notification was never tracked,
+            // so its later close event is intentionally a no-op.
+            replaced?.let {
+                libPebble.markNotificationRead(it.itemId)
+                remove(it.itemId)
+            }
+            logger.d { "suppressed notification from ${mapped.packageName}: device active" }
+            return
+        }
+        if (replaced != null && replaced.packageName == mapped.packageName &&
+            replaced.title == mapped.title && replaced.body == mapped.body &&
+            (WatchAction.Open in replaced.actions) == n.hasDefaultAction
+        ) {
             // Same content re-posted (e.g. progress/hint update): nothing new for the watch.
+            tracker.remap(replaced.itemId, replaced.notificationId, n.id)
             return
         }
 
@@ -95,7 +197,7 @@ class LinuxNotificationListener(
         val watchActions = mutableListOf<WatchAction>()
         val notification = buildTimelineNotification(
             parentId = ANDROID_NOTIFICATIONS_UUID,
-            timestamp = Clock.System.now(),
+            timestamp = n.timestamp ?: Clock.System.now(),
         ) {
             layout = TimelineItem.Layout.GenericNotification
             attributes {
@@ -113,11 +215,11 @@ class LinuxNotificationListener(
                     attributes { title { "Dismiss" } }
                 }
                 watchActions += WatchAction.Dismiss
-                mapped.remoteActions["default"]?.let { remote ->
+                if (n.hasDefaultAction) {
                     action(TimelineItem.Action.Type.Generic) {
                         attributes { title { "Open on phone" } }
                     }
-                    watchActions += WatchAction.Remote(remote)
+                    watchActions += WatchAction.Open
                 }
                 action(TimelineItem.Action.Type.Generic) {
                     attributes { title { "Mute app" } }
@@ -132,37 +234,38 @@ class LinuxNotificationListener(
         }
         track(notification, n, mapped, watchActions)
         libPebble.sendNotification(notification)
-        logger.d { "sent notification from ${mapped.packageName} (dbus id ${n.id})" }
+        logger.d { "sent notification from ${mapped.packageName} (native id ${n.id})" }
     }
 
     private fun track(
         notification: TimelineNotification,
-        n: DBusNotification,
+        n: LinuxNotification,
         mapped: MappedNotification,
         actions: List<WatchAction>,
     ) {
         val active = ActiveNotification(
             itemId = notification.itemId,
-            dbusId = n.id,
+            notificationId = n.id,
             packageName = mapped.packageName,
             title = mapped.title,
             body = mapped.body,
             actions = actions,
         )
-        synchronized(lock) {
-            byItemId[active.itemId] = active
-            byDbusId[active.dbusId] = active.itemId
-            while (byItemId.size > MAX_TRACKED) {
-                val oldest = byItemId.keys.first()
-                byItemId.remove(oldest)?.let { byDbusId.remove(it.dbusId) }
-            }
-        }
+        tracker.track(active)
     }
 
-    private suspend fun onClosed(libPebble: LibPebble, dbusId: UInt) {
-        val itemId = synchronized(lock) { byDbusId[dbusId] } ?: return
+    private suspend fun onClosed(libPebble: LibPebble, notificationId: String) {
+        val itemId = tracker.close(notificationId) ?: return
         libPebble.markNotificationRead(itemId)
-        remove(itemId)
+    }
+
+    private suspend fun onReset(libPebble: LibPebble) {
+        val itemIds = tracker.clear()
+        itemIds.forEach { libPebble.markNotificationRead(it) }
+    }
+
+    private suspend fun onSourcesChanged(libPebble: LibPebble, packageNames: Set<String>) {
+        tracker.removePackages(packageNames).forEach { libPebble.markNotificationRead(it) }
     }
 
     private suspend fun registerApp(mapped: MappedNotification): NotificationAppItem {
@@ -199,7 +302,7 @@ class LinuxNotificationListener(
         }
     }
 
-    companion object {
-        private const val MAX_TRACKED = 200
-    }
 }
+
+private fun MappedNotification.isPebbleTestNotification(): Boolean =
+    packageName == "coredevices.coreapp" && title == "Test Notification"

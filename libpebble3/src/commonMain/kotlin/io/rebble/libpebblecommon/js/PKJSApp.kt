@@ -16,6 +16,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -24,8 +25,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emptyFlow
@@ -34,7 +34,8 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.files.Path
 import kotlinx.serialization.json.Json
@@ -79,6 +80,7 @@ class PKJSApp(
     // Buffered so JS-side `loadUrl(...).trySend(url)` can't silently drop the URL when the
     // receiver in requestConfigurationUrl() hasn't yet reached `receive()`.
     private val urlOpenRequests = Channel<String>(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val configurationRequestMutex = Mutex()
 
     private val _logMessages = Channel<String>(2, BufferOverflow.DROP_OLDEST)
     val logMessages: ReceiveChannel<String> = _logMessages
@@ -198,24 +200,16 @@ class PKJSApp(
                 return null
             }
         }
-        // Drop any stale URL that the JS may have queued spontaneously before this call.
-        while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
-        val url = runningScope!!.async { urlOpenRequests.receive() }
         try {
-            jsRunner.signalShowConfiguration()
+            return requestPKJSConfigurationUrl(configurationRequestMutex, urlOpenRequests) {
+                jsRunner.signalShowConfiguration()
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            url.cancel()
             logger.e(e) { "Error signalling show configuration" }
             return null
         }
-        // Apps can declare "configurable" and never call Pebble.openURL(), so this must be bounded.
-        val received = withTimeoutOrNull(CONFIGURATION_URL_TIMEOUT) { url.await() }
-        if (received == null) {
-            url.cancel()
-            logger.e { "Timed out waiting for configuration URL" }
-            return null
-        }
-        return if (jsRunner.mayOpen(received)) received else null
     }
 
     private fun injectJsRunner(scope: CoroutineScope): JsRunner =
@@ -263,6 +257,45 @@ class PKJSApp(
             jsRunner?.signalWebviewClosed(data)
         }
     }
+}
+
+/**
+ * Wait for the URL emitted by one showConfiguration callback.
+ *
+ * The receiver deliberately belongs to this request's coroutine, rather than the long-lived
+ * companion-app scope.  A caller may time out or cancel a request; leaving that receiver in the
+ * session scope would let it steal the URL from the next settings request.
+ */
+internal suspend fun awaitPKJSConfigurationUrl(
+    urlOpenRequests: ReceiveChannel<String>,
+    signalShowConfiguration: suspend () -> Unit,
+): String = coroutineScope {
+    val url = async { urlOpenRequests.receive() }
+    try {
+        signalShowConfiguration()
+        url.await()
+    } finally {
+        url.cancel()
+    }
+}
+
+/**
+ * Serialize the complete configuration request lifecycle for one PKJS session.
+ *
+ * There is one URL channel per session, so concurrent callers cannot independently drain it or
+ * determine which showConfiguration callback produced a URL. Holding this mutex until the URL is
+ * received makes each request own exactly one drain/signal/response sequence. [withLock] releases
+ * it when a caller is cancelled.
+ */
+internal suspend fun requestPKJSConfigurationUrl(
+    requestMutex: Mutex,
+    urlOpenRequests: ReceiveChannel<String>,
+    signalShowConfiguration: suspend () -> Unit,
+): String = requestMutex.withLock {
+    // Drop a URL that arrived before this request started, never one belonging to a concurrent
+    // request (which cannot run while this mutex is held).
+    while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
+    awaitPKJSConfigurationUrl(urlOpenRequests, signalShowConfiguration)
 }
 
 fun AppMessageDictionary.toJSData(appKeys: Map<String, Int>): String {

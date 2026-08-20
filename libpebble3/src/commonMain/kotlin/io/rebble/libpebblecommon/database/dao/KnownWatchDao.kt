@@ -11,6 +11,10 @@ interface KnownWatchDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdate(watch: KnownWatchItem)
 
+    /** Bulk Room inserts are transactional. Existing watch metadata must never be replaced. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfMissing(watches: List<KnownWatchItem>): List<Long>
+
     @Query("SELECT * FROM KnownWatchItem")
     suspend fun knownWatches(): List<KnownWatchItem>
 

@@ -123,7 +123,8 @@ sealed interface ConnectedPebbleDevice :
     ConnectedPebble.CompanionAppControl,
     ConnectedPebble.Screenshot,
     ConnectedPebble.Language,
-    ConnectedPebble.Health
+    ConnectedPebble.Health,
+    ConnectedPebble.TimelineControl
 
 /**
  * Put all specific functionality here, rather than directly in [ConnectedPebbleDevice].
@@ -247,6 +248,11 @@ object ConnectedPebble {
         suspend fun requestHealthData(fullSync: Boolean): Boolean
     }
 
+    /** Watch-scoped timeline maintenance. Local timeline records remain shared and authoritative. */
+    interface TimelineControl {
+        suspend fun resetTimeline(): Boolean
+    }
+
     class Services(
         val debug: Debug,
         val appRunState: AppRunState,
@@ -263,6 +269,7 @@ object ConnectedPebble {
         val screenshot: Screenshot,
         val language: LanguageInstall,
         val health: Health,
+        val timelineControl: TimelineControl,
     )
 
     class PrfServices(
@@ -280,6 +287,3 @@ fun PebbleDevice.color() = when (this) {
     is BleDiscoveredPebbleDevice -> pebbleScanRecord.watchColor()
     else -> null
 }
-
-internal fun PebbleLeScanRecord.watchColor(): WatchColor? =
-    extendedInfo?.color?.let { WatchColor.fromProtocolNumber(it.toInt()) }

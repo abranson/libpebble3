@@ -150,7 +150,7 @@ class RealLanguagePackInstaller(
             val path = when {
                 sideloadPath != null -> sideloadPath
                 url != null -> {
-                    val downloadedPath = firmwareDownloader.downloadFirmware(url, "pbl")
+                    val downloadedPath = firmwareDownloader.downloadLanguagePack(url)
                     if (downloadedPath == null) {
                         _state.value = idle("Failed to download language pack")
                         return@launch
@@ -242,27 +242,3 @@ data class InstalledLanguagePack(
     val isoLocal: String,
     val version: Int,
 )
-
-data class WatchLanguagePack(
-    val slot: Int,
-    val locale: String,
-    val name: String,
-    val version: Int,
-    val readable: Boolean,
-    val hasTranslation: Boolean,
-    val isActive: Boolean,
-)
-
-internal fun SystemMessage.LanguagePacksResponse.toWatchLanguagePacks(): List<WatchLanguagePack> =
-    packs.filter { it.present }.map {
-        val slot = it.slot.get().toInt()
-        WatchLanguagePack(
-            slot = slot,
-            locale = it.locale.get(),
-            name = it.name.get(),
-            version = it.version.get().toInt(),
-            readable = it.readable,
-            hasTranslation = it.hasTranslation,
-            isActive = activeSlot.get().toInt() == slot,
-        )
-    }

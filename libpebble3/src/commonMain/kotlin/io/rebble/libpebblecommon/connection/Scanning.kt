@@ -58,6 +58,9 @@ class RealScanning(
 
     override fun startBleScan() {
         Logger.d("startBleScan")
+        // BlueZ discovery filters are adapter-global. Never let the BR/EDR scanner and the BLE
+        // scanner overwrite each other's filter or stop each other's discovery session.
+        stopClassicScan()
         bleScanJob?.cancel()
         // Adapter is on but the BLE scan stack isn't ready — on Android <12 this means
         // location services are off, which is required for BLE scanning by the OS.
@@ -115,6 +118,8 @@ class RealScanning(
 
     override fun startClassicScan() {
         Logger.d("startClassicScan")
+        // See startBleScan(): both transports share the selected physical adapter.
+        stopBleScan()
         classicScanJob?.cancel()
         watchConnector.clearScanResults()
         _isClassicScanning.value = true

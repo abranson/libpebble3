@@ -5,8 +5,8 @@ import kotlinx.coroutines.flow.StateFlow
 /**
  * System volume, abstracted because MPRIS has no *stepping* — only an optional absolute Volume
  * property on the player, which not every player implements and which changes the player rather
- * than the device. A platform with a real mixer API (Sailfish's PulseAudio MainVolume2) should
- * bind its own; [MprisVolume] is the fallback.
+ * than the device. A platform with a real mixer API should bind its own;
+ * [MprisVolume] is the fallback.
  *
  * Implementations block and are called on [kotlinx.coroutines.Dispatchers.IO].
  */

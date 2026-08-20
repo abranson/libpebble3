@@ -28,9 +28,9 @@ data class MappedNotification(
     val packageName: String,
     val appName: String,
     /**
-     * The Android package, when this came from an Android compatibility layer (Sailfish's
-     * AppSupport). Lets [io.rebble.libpebblecommon.notification.processor.NotificationProperties]
-     * resolve an icon/colour, since that table is keyed on Android package names.
+     * The Android package when this came from an Android compatibility layer.
+     * Lets [io.rebble.libpebblecommon.notification.processor.NotificationProperties]
+     * resolve an icon/colour, since that table is keyed on package names.
      */
     val androidPackageName: String? = null,
     /** freedesktop category (`im.received`, `email.arrived`, …), for icon fallback. */
@@ -85,7 +85,7 @@ class FreedesktopHintMapper : NotificationHintMapper {
 fun themeIconName(appIcon: String): String? = when {
     appIcon.isEmpty() -> null
     appIcon.startsWith("image://theme/") -> appIcon.removePrefix("image://theme/")
-    // Anything path-like is a bitmap (AppSupport writes PNGs to /tmp/apkd/notif/).
+    // Anything path-like is a bitmap rather than a theme icon name.
     appIcon.startsWith("/") || appIcon.startsWith("file:") -> null
     else -> appIcon
 }

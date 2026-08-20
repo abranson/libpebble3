@@ -2,7 +2,7 @@ package io.rebble.libpebblecommon.linux.web
 
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.put
@@ -18,12 +18,11 @@ import kotlinx.io.files.Path
 import java.io.File
 
 /**
- * Rebble appstore: the rockpool UI browses the store itself and hands the daemon a store id
- * to install (org.rockwork InstallApp) — resolve it to the latest release's pbw and download.
+ * Resolve a Rebble appstore ID to the latest release's PBW and download it.
  */
 object RebbleAppstore {
     private val logger = Logger.withTag("RebbleAppstore")
-    private val httpClient by lazy { HttpClient(CIO) }
+    private val httpClient by lazy(::newRebbleHttpClient)
     private val json = Json { ignoreUnknownKeys = true }
 
     /** A downloaded pbw plus the app's UUID (needed to add it to the Rebble locker). */
@@ -38,6 +37,7 @@ object RebbleAppstore {
             }
             json.decodeFromString<AppsResponse>(response.bodyAsText()).data.firstOrNull()
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "app lookup failed for $storeId: ${e.message}" }
             null
         } ?: run {
@@ -50,7 +50,12 @@ object RebbleAppstore {
         }
         val dest = File(JvmPaths.cacheSubdir("appstore").toFile(), "$storeId.pbw")
         return try {
-            val response = httpClient.get(pbwUrl)
+            val response = httpClient.get(pbwUrl) {
+                timeout {
+                    requestTimeoutMillis = PBW_REQUEST_TIMEOUT_MS
+                    socketTimeoutMillis = PBW_SOCKET_TIMEOUT_MS
+                }
+            }
             if (!response.status.isSuccess()) {
                 logger.w { "pbw download failed: ${response.status}" }
                 return null
@@ -59,6 +64,7 @@ object RebbleAppstore {
             logger.d { "downloaded $pbwUrl to $dest" }
             DownloadedApp(Path(dest.absolutePath), record.uuid)
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "pbw download failed: ${e.message}" }
             null
         }
@@ -66,8 +72,8 @@ object RebbleAppstore {
 
     /**
      * Add an app to the user's Rebble locker, which is what assigns its per-user timeline
-     * user_token. rockpool installs by sideloading the pbw, so without this the app is never a
-     * locker member and Pebble.getTimelineToken() has no real token (falls back to sandbox).
+     * user_token. Sideloading a PBW alone does not make the app a locker
+     * member, so Pebble.getTimelineToken() otherwise falls back to sandbox.
      * Best-effort: needs a signed-in token; returns false and logs if it can't.
      */
     suspend fun addToLocker(uuid: String, token: String?): Boolean {
@@ -82,12 +88,15 @@ object RebbleAppstore {
                 true
             }
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "add-to-locker($uuid) failed: ${e.message}" }
             false
         }
     }
 
     private const val API_URL = "https://appstore-api.rebble.io/api/v1"
+    private const val PBW_REQUEST_TIMEOUT_MS = 2 * 60 * 1000L
+    private const val PBW_SOCKET_TIMEOUT_MS = 30 * 1000L
 }
 
 @Serializable

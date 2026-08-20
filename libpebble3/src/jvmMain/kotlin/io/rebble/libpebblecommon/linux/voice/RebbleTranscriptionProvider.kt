@@ -10,8 +10,8 @@ import io.rebble.libpebblecommon.voice.VoiceEncoderInfo
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Voice dictation for Rebble subscribers. Sailfish has no on-device speech engine, so audio goes to
- * Rebble's ASR ([RebbleAsrService]). The ASR endpoint host comes from the account's boot config
+ * Voice dictation for Rebble subscribers using Rebble's ASR
+ * ([RebbleAsrService]). The endpoint host comes from the account's boot config
  * (`config.voice.languages[].endpoint`), which is only populated for entitled accounts — so an
  * empty list is how a non-subscriber presents. The ASR token is baked into that hostname; the POST
  * itself is unauthenticated (legacy Nuance).

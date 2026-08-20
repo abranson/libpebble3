@@ -263,7 +263,7 @@ class MprisController(private val scope: LibPebbleCoroutineScope) {
         playbackRate = if (playback == PlaybackState.Playing) rate else 0f,
         shuffle = shuffle,
         repeat = repeat,
-        // The player's own volume. A platform with a system mixer (Sailfish's PulseAudio) binds a
+        // The player's own volume. A platform with a system mixer binds a
         // VolumeControl that overrides this in LinuxSystemMusicControl.
         volume = volumePercent ?: 0,
     )

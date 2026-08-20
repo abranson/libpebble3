@@ -29,6 +29,7 @@ import io.rebble.libpebblecommon.permissions.PermissionDecision
 import io.rebble.libpebblecommon.plugin.PluginPermissions
 import io.rebble.libpebblecommon.timeline.TimelineColor
 import io.rebble.libpebblecommon.timeline.toPebbleColor
+import io.rebble.libpebblecommon.locker.Locker
 import io.rebble.libpebblecommon.util.PebbleColor
 import io.rebble.libpebblecommon.util.toPebbleColor
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -50,8 +51,7 @@ class RemoteTimelineEmulator(
     private val json: Json,
     private val timelinePinRealDao: TimelinePinRealDao,
     private val timelineReminderRealDao: TimelineReminderRealDao,
-    private val timelineNotificationRealDao: TimelineNotificationRealDao,
-    private val permissions: AppPermissions,
+    private val locker: Locker,
 ) : HttpInterceptor {
     override val servedLocally = true
 
@@ -111,24 +111,27 @@ class RemoteTimelineEmulator(
 
     /** Callers check the app may add pins (`mayAddPins`). */
     suspend fun insertPin(appUuid: Uuid, pin: TimelinePinJson) {
-        val existingPin = timelinePinRealDao.getPinsForWatchapp(appUuid).find { it.backingId == pin.id }
-        val pinUuid = existingPin?.itemId ?: Uuid.random()
-        val timelinePin = asPin(jsonPin = pin, appUuid = appUuid, pinUuid = pinUuid)
-        //        logger.v { "insertPin: timelinePin=$timelinePin" }
-        if (timelinePin == null) {
-            logger.w { "insert pin == null" }
-            return
+        val inserted = locker.mutateForLiveLockerApp(appUuid) {
+            val existingPin = timelinePinRealDao.getPinsForWatchapp(appUuid)
+                .find { it.backingId == pin.id }
+            val pinUuid = existingPin?.itemId ?: Uuid.random()
+            val timelinePin = asPin(jsonPin = pin, appUuid = appUuid, pinUuid = pinUuid)
+            //        logger.v { "insertPin: timelinePin=$timelinePin" }
+            if (timelinePin == null) {
+                logger.w { "insert pin == null" }
+                return@mutateForLiveLockerApp
+            }
+            // TODO create/update notifications
+            logger.v { "inserting pin ${timelinePin.itemId} (${pin.id})" }
+            timelinePinRealDao.insertOrReplace(timelinePin)
+            timelineReminderRealDao.markForDeletionByParentId(timelinePin.itemId)
+            pin.reminders?.forEach { reminder ->
+                val timelineReminder = asReminder(jsonReminder = reminder, pinUuid = pinUuid)
+                timelineReminder?.let { timelineReminderRealDao.insertOrReplace(it) }
+            }
         }
-        logger.v { "inserting pin ${timelinePin.itemId} (${pin.id})" }
-        timelinePinRealDao.insertOrReplace(timelinePin)
-        pin.notificationFor(existingPin, timelinePin)
-            ?.takeIf { mayShowNotifications(appUuid) }
-            ?.let { asNotification(it, appUuid) }
-            ?.let { timelineNotificationRealDao.insertOrReplace(it) }
-        timelineReminderRealDao.markForDeletionByParentId(timelinePin.itemId)
-        pin.reminders?.forEach { reminder ->
-            val timelineReminder = asReminder(jsonReminder = reminder, pinUuid = pinUuid)
-            timelineReminder?.let { timelineReminderRealDao.insertOrReplace(it) }
+        if (!inserted) {
+            logger.w { "Ignoring timeline pin from app $appUuid after it left the locker" }
         }
     }
 
@@ -166,14 +169,22 @@ class RemoteTimelineEmulator(
         permissions.request(appUuid, PluginPermissions.TIMELINE) == PermissionDecision.Granted
 
     suspend fun deletePin(appUuid: Uuid, pinIdentifier: String): Boolean {
-        logger.v { "deletePin: pinIdentifier=$pinIdentifier" }
-        val existingPin = timelinePinRealDao.getPinsForWatchapp(appUuid).find { it.backingId == pinIdentifier }
-        if (existingPin == null) {
-            logger.i { "deletePin: Unknown pin identifier: $pinIdentifier" }
-            return false
+        var deleted = false
+        val liveApp = locker.mutateForLiveLockerApp(appUuid) {
+            logger.v { "deletePin: pinIdentifier=$pinIdentifier" }
+            val existingPin = timelinePinRealDao.getPinsForWatchapp(appUuid)
+                .find { it.backingId == pinIdentifier }
+            if (existingPin == null) {
+                logger.i { "deletePin: Unknown pin identifier: $pinIdentifier" }
+                return@mutateForLiveLockerApp
+            }
+            timelinePinRealDao.markForDeletionWithReminders(
+                existingPin.itemId,
+                timelineReminderRealDao,
+            )
+            deleted = true
         }
-        timelinePinRealDao.markForDeletionWithReminders(existingPin.itemId, timelineReminderRealDao)
-        return true
+        return liveApp && deleted
     }
 
     companion object {

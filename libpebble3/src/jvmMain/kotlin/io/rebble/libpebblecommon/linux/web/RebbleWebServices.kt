@@ -2,13 +2,14 @@ package io.rebble.libpebblecommon.linux.web
 
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.bearerAuth
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
 import io.rebble.libpebblecommon.connection.FirmwareUpdateCheckResult
+import io.rebble.libpebblecommon.connection.WebAccountSession
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.metadata.WatchHardwarePlatform
 import io.rebble.libpebblecommon.services.FirmwareVersion
@@ -18,6 +19,7 @@ import io.rebble.libpebblecommon.web.LockerModelWrapper
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
@@ -28,15 +30,42 @@ import kotlin.uuid.Uuid
  * coredevices/PebbleOS for Core Devices hardware (cohorts doesn't know those; the official
  * app uses Memfault, which needs a private token).
  */
-class RebbleWebServices(
+class RebbleWebServices private constructor(
     private val token: () -> String?,
     private val bootConfig: RebbleBootConfigProvider,
+    private val httpClientProvider: Lazy<HttpClient>,
 ) : WebServices {
+    constructor(
+        token: () -> String?,
+        bootConfig: RebbleBootConfigProvider,
+    ) : this(token, bootConfig, lazy(::newRebbleHttpClient))
+
+    internal constructor(
+        token: () -> String?,
+        bootConfig: RebbleBootConfigProvider,
+        httpClient: HttpClient,
+    ) : this(token, bootConfig, lazyOf(httpClient))
+
     private val logger = Logger.withTag("RebbleWebServices")
 
     // Explicit engine: HttpClient()'s ServiceLoader discovery is fragile under native image.
-    private val httpClient = HttpClient(CIO)
+    private val httpClient by httpClientProvider
     private val json = Json { ignoreUnknownKeys = true }
+    private val accountGeneration = AtomicLong(0)
+
+    override fun usesAccountSessions(): Boolean = true
+
+    override fun currentAccountSession(): WebAccountSession? =
+        accountToken()?.let { RebbleAccountSession(it, accountGeneration.get()) }
+
+    override fun isCurrentAccountSession(session: WebAccountSession): Boolean =
+        session is RebbleAccountSession &&
+            accountToken() == session.credential &&
+            accountGeneration.get() == session.generation
+
+    override fun invalidateAccountSessions() {
+        accountGeneration.incrementAndGet()
+    }
 
     /**
      * The user's Rebble locker (their installed apps), whose entries carry the per-app timeline
@@ -44,42 +73,101 @@ class RebbleWebServices(
      * driven on demand by requestLockerSync(), not automatically. Returns null (leaving timeline
      * tokens on the emulator fallback) if not signed in or the fetch/parse fails.
      */
-    override suspend fun fetchLocker(): LockerModelWrapper? {
-        val url = bootConfig.get()?.config?.locker?.getEndpoint ?: run {
+    override suspend fun fetchLocker(): LockerModelWrapper? =
+        currentAccountSession()?.let { fetchLocker(it) }
+
+    override suspend fun fetchLocker(session: WebAccountSession): LockerModelWrapper? {
+        if (session !is RebbleAccountSession) return null
+        val bearer = session.credential
+        if (!isCurrentAccountSession(session)) return null
+        val config = bootConfig.get()
+        if (!isCurrentAccountSession(session)) return null
+        val url = config?.config?.locker?.getEndpoint ?: run {
             logger.d { "no locker endpoint in boot config" }
             return null
         }
-        val bearer = token()?.takeIf { it.isNotEmpty() } ?: return null
         return try {
             val response = httpClient.get(url) { bearerAuth(bearer) }
+            if (!isCurrentAccountSession(session)) return null
             if (!response.status.isSuccess()) {
                 logger.w { "locker fetch returned ${response.status}" }
                 return null
             }
-            val model = json.decodeFromString<LockerModel>(response.bodyAsText())
+            val body = response.bodyAsText()
+            if (!isCurrentAccountSession(session)) return null
+            val model = json.decodeFromString<LockerModel>(body)
+            if (!isCurrentAccountSession(session)) return null
             LockerModelWrapper(locker = model, failedToFetchUuids = emptySet())
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w(e) { "locker fetch failed: ${e.message}" }
             null
         }
     }
-    override suspend fun removeFromLocker(id: Uuid): Boolean = false
+
+    override suspend fun removeFromLocker(id: Uuid): Boolean =
+        currentAccountSession()?.let { removeFromLocker(id, it) } ?: false
+
+    override suspend fun removeFromLocker(id: Uuid, session: WebAccountSession): Boolean {
+        if (session !is RebbleAccountSession) return false
+        val bearer = session.credential
+        if (!isCurrentAccountSession(session)) return false
+        val config = bootConfig.get()
+        if (!isCurrentAccountSession(session)) return false
+        val template = config?.config?.locker?.removeEndpoint ?: run {
+            logger.d { "no locker removal endpoint in boot config" }
+            return false
+        }
+        val url = lockerRemovalUrl(template, id) ?: run {
+            logger.w { "locker removal endpoint has an invalid UUID placeholder" }
+            return false
+        }
+        return try {
+            val response = httpClient.delete(url) { bearerAuth(bearer) }
+            if (!isCurrentAccountSession(session)) return false
+            if (!response.status.isSuccess()) {
+                logger.w { "locker removal returned ${response.status}" }
+                false
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            e.rethrowCancellation()
+            logger.w(e) { "locker removal failed: ${e.message}" }
+            false
+        }
+    }
 
     /**
-     * Timeline token for an app not in the locker (rockpool installs by sideloading the pbw, so
-     * store apps grabbed there aren't locker members). Rebble's timeline-sync mints a sandbox
-     * token per app, keyed on the account's bearer — same endpoint the old C++ rockpool used.
+     * Timeline token for an app not in the locker. Rebble's timeline-sync
+     * mints a sandbox token per app, keyed on the account bearer.
      */
     override suspend fun getSandboxTimelineToken(uuid: Uuid): String? {
-        val bearer = token()?.takeIf { it.isNotEmpty() } ?: return null
+        val session = currentAccountSession() ?: return null
+        return getSandboxTimelineToken(uuid, session)
+    }
+
+    override suspend fun getSandboxTimelineToken(
+        uuid: Uuid,
+        session: WebAccountSession,
+    ): String? {
+        if (session !is RebbleAccountSession) return null
+        val bearer = session.credential
+        if (!isCurrentAccountSession(session)) return null
         return try {
             val response = httpClient.get("$SANDBOX_TOKEN_URL/$uuid") { bearerAuth(bearer) }
+            if (!isCurrentAccountSession(session)) return null
             if (!response.status.isSuccess()) {
                 logger.w { "sandbox token for $uuid returned ${response.status}" }
                 return null
             }
-            json.decodeFromString<SandboxTokenResponse>(response.bodyAsText()).token
+            val body = response.bodyAsText()
+            if (!isCurrentAccountSession(session)) return null
+            val sandboxToken = json.decodeFromString<SandboxTokenResponse>(body).token
+            if (!isCurrentAccountSession(session)) return null
+            sandboxToken
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w(e) { "sandbox token fetch failed: ${e.message}" }
             null
         }
@@ -107,6 +195,7 @@ class RebbleWebServices(
                 parameter("pebbleAppVersion", APP_VERSION)
             }
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "cohorts request failed: ${e.message}" }
             return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
         }
@@ -117,6 +206,7 @@ class RebbleWebServices(
         val normalFw = try {
             json.decodeFromString<CohortsResponse>(response.bodyAsText()).fw?.normal
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "couldn't parse cohorts response: ${e.message}" }
             null
         } ?: return FirmwareUpdateCheckResult.UpdateCheckFailed("No firmware found for ${watch.platform.revision}")
@@ -135,6 +225,7 @@ class RebbleWebServices(
         val response = try {
             httpClient.get("$PEBBLEOS_RELEASES_URL/latest")
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "GitHub release request failed: ${e.message}" }
             return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
         }
@@ -145,6 +236,7 @@ class RebbleWebServices(
         val release = try {
             json.decodeFromString<GithubRelease>(response.bodyAsText())
         } catch (e: Exception) {
+            e.rethrowCancellation()
             logger.w { "couldn't parse GitHub release: ${e.message}" }
             return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
         }
@@ -198,6 +290,8 @@ class RebbleWebServices(
 
     private fun FirmwareVersion.numeric(): Int = patch + minor * 1_000 + major * 1_000_000
 
+    private fun accountToken(): String? = token()?.takeIf(String::isNotBlank)
+
     companion object {
         private const val COHORTS_URL = "https://cohorts.rebble.io"
         private const val PEBBLEOS_RELEASES_URL =
@@ -209,6 +303,21 @@ class RebbleWebServices(
         private const val SANDBOX_TOKEN_URL = "https://timeline-sync.rebble.io/v1/tokens/sandbox"
     }
 }
+
+private class RebbleAccountSession(
+    val credential: String,
+    val generation: Long,
+) : WebAccountSession {
+    override fun toString(): String = "WebAccountSession(redacted)"
+}
+
+internal fun lockerRemovalUrl(template: String, id: Uuid): String? {
+    val first = template.indexOf(LOCKER_UUID_PLACEHOLDER)
+    if (first < 0 || first != template.lastIndexOf(LOCKER_UUID_PLACEHOLDER)) return null
+    return template.replace(LOCKER_UUID_PLACEHOLDER, id.toString())
+}
+
+private const val LOCKER_UUID_PLACEHOLDER = "\$\$app_uuid\$\$"
 
 @Serializable
 private data class SandboxTokenResponse(val token: String? = null)

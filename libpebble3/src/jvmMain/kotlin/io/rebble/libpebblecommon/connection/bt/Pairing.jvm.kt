@@ -4,19 +4,33 @@ import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.connection.AppContext
 import io.rebble.libpebblecommon.connection.PebbleBleIdentifier
 import io.rebble.libpebblecommon.connection.PebbleBtClassicIdentifier
+import io.rebble.libpebblecommon.connection.isCanonicalBluetoothAddress
 import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezAgent
+import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezDiscoveryTransport
 import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezManager
+import io.rebble.libpebblecommon.connection.bt.ble.bluez.addBluezSigHandler
+import io.rebble.libpebblecommon.connection.bt.ble.bluez.bluezDevicePath
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.ConnectivityWatcher
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.LEConstants
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
-import io.rebble.libpebblecommon.linux.dbus.RawSessionConnection
+import io.rebble.libpebblecommon.di.LibPebbleKoinComponent
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
+import org.freedesktop.dbus.handlers.AbstractPropertiesChangedHandler
+import org.freedesktop.dbus.interfaces.Properties
 import kotlin.time.Duration.Companion.seconds
 
 private val logger = Logger.withTag("Pairing.jvm")
+private object PairingDependencies : LibPebbleKoinComponent
+
+/** Optional native-Linux pairing route used before direct BlueZ pairing. */
+fun interface LinuxPairingRequester {
+    fun requestPairing(address: String): Boolean
+}
 
 actual fun isBonded(identifier: PebbleBleIdentifier): Boolean {
     val device = BluezManager.findDevice(identifier.asString) ?: return false
@@ -30,7 +44,7 @@ actual fun isBonded(identifier: PebbleBleIdentifier): Boolean {
 
 actual fun createBond(identifier: PebbleBleIdentifier): Boolean {
     logger.d("createBond($identifier)")
-    if (requestPlatformPairing(identifier)) {
+    if (requestNativePairing(identifier.asString)) {
         return true
     }
     BluezAgent.ensureRegistered()
@@ -63,30 +77,24 @@ actual fun createBond(identifier: PebbleBleIdentifier): Boolean {
 }
 
 /**
- * Some Linux platforms deliberately reserve BlueZ's pairing methods for a small trusted broker.
- * Keep the generic daemon unprivileged and delegate only the typed pair request when the platform
- * package explicitly selects a supported broker.
+ * A native-Linux host may provide a pairing requester when direct BlueZ
+ * pairing is not available. Failure falls back to the generic BlueZ path.
  */
-private fun requestPlatformPairing(identifier: PebbleBleIdentifier): Boolean {
-    if (System.getenv(PAIRING_BROKER_ENV) != SAILFISH_LIPSTICK_BROKER) {
-        return false
-    }
-    return try {
-        RawSessionConnection.connect()?.use { conn ->
-            conn.callWithReply(
-                "com.jolla.lipstick",
-                "/bluetooth",
-                "com.jolla.lipstick",
-                "pairWithDevice",
-                "s",
-                identifier.asString,
-            ) != null
-        } ?: false
-    } catch (e: Throwable) {
-        logger.e("platform pairing broker failed for ${identifier.asString}", e)
+private fun requestNativePairing(address: String): Boolean =
+    if (!isCanonicalBluetoothAddress(address)) {
+        logger.e { "refusing native pairing request for invalid Bluetooth address: $address" }
         false
-    }
-}
+    } else
+    PairingDependencies.getKoin()
+        .getOrNull<LinuxPairingRequester>()
+        ?.let { requester ->
+            runCatching { requester.requestPairing(address) }
+                .onFailure {
+                    logger.e("native pairing requester failed for $address", it)
+                }
+                .getOrDefault(false)
+        }
+        ?: false
 
 actual fun getBluetoothDevicePairEvents(
     context: AppContext,
@@ -119,19 +127,113 @@ actual fun getBluetoothDevicePairEvents(
 }
 
 actual fun isBondedClassic(identifier: PebbleBtClassicIdentifier): Boolean {
-    throw UnsupportedOperationException("BT Classic not supported on JVM")
+    val device = BluezManager.findDevice(identifier.asString) ?: return false
+    return try {
+        device.isPaired == true
+    } catch (e: Throwable) {
+        logger.e("error checking classic bond state for $identifier", e)
+        false
+    }
 }
 
 actual fun createBondClassic(identifier: PebbleBtClassicIdentifier): Boolean {
-    throw UnsupportedOperationException("BT Classic not supported on JVM")
+    logger.d("createBondClassic($identifier)")
+    if (requestNativePairing(identifier.asString)) {
+        return true
+    }
+    BluezAgent.ensureRegistered()
+    BluezManager.defaultAdapter()?.let {
+        try {
+            it.setPairable(true)
+        } catch (e: Throwable) {
+            logger.e("error setting adapter pairable for classic pairing", e)
+        }
+    }
+    val device = BluezManager.findDeviceRediscovering(
+        identifier.asString,
+        transport = BluezDiscoveryTransport.Bredr,
+    )
+    if (device == null) {
+        logger.e("createBondClassic: device not found: $identifier")
+        return false
+    }
+    return try {
+        val paired = device.pair()
+        if (paired) {
+            try {
+                device.setTrusted(true)
+            } catch (e: Throwable) {
+                logger.e("error setting classic device trusted", e)
+            }
+        }
+        paired
+    } catch (e: Throwable) {
+        logger.e("createBondClassic failed for $identifier", e)
+        false
+    }
 }
 
 actual fun getBluetoothClassicDevicePairEvents(
     context: AppContext,
     identifier: PebbleBtClassicIdentifier,
-): Flow<BluetoothClassicDevicePairEvent> {
-    throw UnsupportedOperationException("BT Classic not supported on JVM")
+): Flow<BluetoothClassicDevicePairEvent> = callbackFlow {
+    val dm = BluezManager.deviceManagerOrNull()
+    val adapter = BluezManager.defaultAdapter()
+    val devicePath = adapter?.let { bluezDevicePath(it.dbusPath, identifier.asString) }
+    if (dm == null || devicePath == null) {
+        logger.w { "classic pairing events unavailable for $identifier: BlueZ/D-Bus not reachable" }
+        close()
+        return@callbackFlow
+    }
+
+    fun sendBondState(paired: Boolean?) {
+        trySend(
+            BluetoothClassicDevicePairEvent(
+                device = identifier,
+                bondState = classicBondState(paired),
+                unbondReason = null,
+            )
+        )
+    }
+
+    val handler = object : AbstractPropertiesChangedHandler() {
+        override fun handle(signal: Properties.PropertiesChanged) {
+            if (signal.interfaceName != CLASSIC_DEVICE_INTERFACE || signal.path != devicePath) return
+            val paired = signal.propertiesChanged["Paired"]?.value as? Boolean ?: return
+            sendBondState(paired)
+        }
+    }
+
+    var registration: AutoCloseable? = null
+    try {
+        // Resolve BlueZ's current unique sender rather than accepting any process that happens
+        // to emit a PropertiesChanged signal for the same object path.
+        registration = dm.dbusConnection.addBluezSigHandler(
+            Properties.PropertiesChanged::class.java,
+            handler,
+        )
+        // Pairing may have completed before this cold flow is collected. A snapshot after
+        // handler registration closes that race. Snapshot failure is non-fatal: the registered
+        // signal still reports a later transition.
+        val paired = runCatching {
+            BluezManager.findDevice(identifier.asString)?.isPaired
+        }.onFailure {
+            logger.w { "could not read initial classic pairing state: ${it.message}" }
+        }.getOrNull()
+        sendBondState(paired)
+    } catch (e: Throwable) {
+        registration?.let { BluezManager.closeSignalRegistrations(listOf(it)) }
+        logger.e("error registering classic pairing state handler", e)
+        close(e)
+        return@callbackFlow
+    }
+
+    awaitClose {
+        registration?.let { BluezManager.closeSignalRegistrations(listOf(it)) }
+    }
 }
 
-private const val PAIRING_BROKER_ENV = "LIBPEBBLE3D_BLUEZ_PAIRING_BROKER"
-private const val SAILFISH_LIPSTICK_BROKER = "sailfish-lipstick"
+private const val CLASSIC_DEVICE_INTERFACE = "org.bluez.Device1"
+
+internal fun classicBondState(paired: Boolean?): Int =
+    if (paired == true) LEConstants.BOND_BONDED else LEConstants.BOND_NONE

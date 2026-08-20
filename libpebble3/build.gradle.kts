@@ -70,8 +70,8 @@ kotlin {
         }
     }
 
-    // Generic-Linux library target. The daemon entrypoint (fun main) and its dist packaging live
-    // in the :libpebble3d-sailfish module.
+    // Generic-Linux library target. Applications provide their own entrypoint
+    // and distribution packaging.
     jvm()
 
     listOf(

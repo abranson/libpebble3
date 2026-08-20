@@ -8,6 +8,7 @@ import com.github.hypfvieh.bluetooth.wrapper.BluetoothGattService
 import io.rebble.libpebblecommon.connection.ConnectionFailureReason
 import io.rebble.libpebblecommon.connection.PebbleBleIdentifier
 import io.rebble.libpebblecommon.connection.bt.ble.bluez.BluezManager
+import io.rebble.libpebblecommon.connection.bt.ble.bluez.addBluezSigHandler
 import io.rebble.libpebblecommon.connection.bt.ble.transport.ConnectedGattClient
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattCharacteristic
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattConnectionResult
@@ -15,7 +16,6 @@ import io.rebble.libpebblecommon.connection.bt.ble.transport.GattConnector
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattDescriptor
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattService
 import io.rebble.libpebblecommon.connection.bt.ble.transport.GattWriteType
-import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +23,6 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.bluez.Adapter1
@@ -32,6 +31,7 @@ import org.freedesktop.dbus.errors.NoReply
 import org.freedesktop.dbus.handlers.AbstractPropertiesChangedHandler
 import org.freedesktop.dbus.interfaces.Properties
 import org.freedesktop.dbus.types.Variant
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.uuid.Uuid
@@ -43,13 +43,11 @@ private const val GATT_CHARACTERISTIC_INTERFACE = "org.bluez.GattCharacteristic1
 private const val DEFAULT_ATT_MTU = 23
 
 /**
- * GATT central over BlueZ D-Bus, replacing Kable/btleplug on jvm/Linux (whose prebuilt
- * native library needs a newer glibc than Sailfish OS ships). Blocking D-Bus calls are
- * confined to Dispatchers.IO.
+ * GATT central over BlueZ D-Bus, replacing Kable/btleplug on native Linux.
+ * Blocking D-Bus calls are confined to Dispatchers.IO.
  */
 internal class BluezGattConnector(
     private val identifier: PebbleBleIdentifier,
-    private val scope: ConnectionCoroutineScope,
 ) : GattConnector {
     private val logger = Logger.withTag("BluezGattConnector/${identifier.asString}")
 
@@ -57,15 +55,14 @@ internal class BluezGattConnector(
     override val disconnected: Deferred<ConnectionFailureReason> = _disconnected
 
     private var device: BluetoothDevice? = null
-    private var deviceManager: DeviceManager? = null
-    private var disconnectionHandler: AbstractPropertiesChangedHandler? = null
+    private var disconnectionRegistration: AutoCloseable? = null
+    private var closed = false
     @Volatile
     private var attemptedConnection = false
 
     override suspend fun connect(): GattConnectionResult = withContext(Dispatchers.IO) {
         val dm = BluezManager.deviceManagerOrNull()
             ?: return@withContext failure(ConnectionFailureReason.FailedToConnect)
-        deviceManager = dm
         // A watch that was advertising seconds ago and now can't be found usually means the
         // controller's RX path wedged, not that the watch went away. Power-cycle the adapter
         // once and look again before giving up.
@@ -85,10 +82,10 @@ internal class BluezGattConnector(
         // Pebble advertisements lack the "BR/EDR Not Supported" flag, so BlueZ marks the
         // watch dual-mode and Connect() pages the (nonexistent) classic radio until it
         // times out — LE is never attempted (btmon: Create Connection → Page Timeout).
-        // PreferredBearer (BlueZ >= 5.79) forces the LE path; on older BlueZ (Sailfish
-        // ships 5.66) the only bypass is the experimental Adapter1.ConnectDevice, used
-        // below for unbonded watches. Once bonded, select_conn_bearer prefers the bonded
-        // LE bearer and plain Connect() works everywhere.
+        // PreferredBearer (BlueZ >= 5.79) forces the LE path; on older BlueZ
+        // the only bypass is the experimental Adapter1.ConnectDevice, used
+        // below for unbonded watches. Once bonded, select_conn_bearer prefers
+        // the bonded LE bearer and plain Connect() works everywhere.
         val leBearerForced = runCatching {
             dm.dbusConnection.getRemoteObject("org.bluez", devicePath, Properties::class.java)
                 .Set(DEVICE_INTERFACE, "PreferredBearer", "le")
@@ -106,8 +103,22 @@ internal class BluezGattConnector(
             }
         }
         try {
-            dm.registerPropertyHandler(handler)
-            disconnectionHandler = handler
+            val registration = dm.dbusConnection.addBluezSigHandler(
+                Properties.PropertiesChanged::class.java,
+                handler,
+            )
+            val closeImmediately = synchronized(this@BluezGattConnector) {
+                if (closed) {
+                    true
+                } else {
+                    disconnectionRegistration = registration
+                    false
+                }
+            }
+            if (closeImmediately) {
+                BluezManager.closeSignalRegistrations(listOf(registration))
+                return@withContext failure(ConnectionFailureReason.FailedToConnect)
+            }
         } catch (e: Throwable) {
             logger.e("error registering disconnection handler", e)
             return@withContext failure(ConnectionFailureReason.FailedToConnect)
@@ -115,12 +126,8 @@ internal class BluezGattConnector(
 
         // Active discovery starves LE connection attempts on this controller; make sure
         // it's off no matter who started it.
-        runCatching {
-            BluezManager.defaultAdapter()?.takeIf { it.isDiscovering }?.let {
-                logger.d { "stopping discovery before connect" }
-                it.stopDiscovery()
-            }
-        }
+        runCatching { BluezManager.stopDiscoveryForConnection() }
+            .onSuccess { logger.d { "stopped discovery before connect" } }
 
         attemptedConnection = true
         val bonded = runCatching { dev.isPaired }.getOrNull() == true
@@ -170,8 +177,16 @@ internal class BluezGattConnector(
     }
 
     private fun failure(reason: ConnectionFailureReason): GattConnectionResult.Failure {
+        unregisterDisconnectionHandler()
         _disconnected.complete(reason)
         return GattConnectionResult.Failure(reason)
+    }
+
+    private fun unregisterDisconnectionHandler() {
+        val registration = synchronized(this) {
+            disconnectionRegistration.also { disconnectionRegistration = null }
+        } ?: return
+        BluezManager.closeSignalRegistrations(listOf(registration))
     }
 
     private suspend fun waitUntilConnected(dev: BluetoothDevice) {
@@ -190,8 +205,8 @@ internal class BluezGattConnector(
      * explicit LE address type, bypassing the BR/EDR-biased bearer selection. It refuses to
      * touch an existing device object, so the (unbonded, temporary) one is removed first —
      * BlueZ recreates it at the same object path, keeping [dev]'s path-based proxy valid.
-     * ConnectDevice is an experimental method: hidden unless bluetoothd runs with -E /
-     * Experimental=true (the libpebble3d RPM ships a bluetooth.service drop-in for this).
+     * ConnectDevice is an experimental method: hidden unless bluetoothd runs
+     * with `-E` or `Experimental=true`.
      */
     private suspend fun connectDeviceLe(dm: DeviceManager, dev: BluetoothDevice): Boolean {
         val adapter = BluezManager.defaultAdapter() ?: return false
@@ -214,10 +229,8 @@ internal class BluezGattConnector(
             true
         } catch (e: Exception) {
             logger.e {
-                "ConnectDevice failed: ${e.message} — if the method is missing, bluetoothd " +
-                    "needs experimental APIs enabled (libpebble3d installs a " +
-                    "bluetooth.service drop-in; check TRACING=-E is in effect and " +
-                    "bluetooth.service was restarted)"
+                "ConnectDevice failed: ${e.message} — if the method is missing, " +
+                    "enable bluetoothd experimental APIs and restart bluetoothd"
             }
             false
         }
@@ -268,19 +281,12 @@ internal class BluezGattConnector(
         if (!attemptedConnection) {
             _disconnected.complete(ConnectionFailureReason.NotAnError_NeverAttmpedConnection)
         }
+        unregisterDisconnectionHandler()
     }
 
     override fun close() {
-        val dm = deviceManager
-        val handler = disconnectionHandler
-        if (dm != null && handler != null) {
-            // Unregistering synchronously can deadlock when called from a signal-dispatch
-            // thread; hop to the connection scope.
-            scope.launch(Dispatchers.IO) {
-                runCatching { dm.unRegisterPropertyHandler(handler) }
-            }
-            disconnectionHandler = null
-        }
+        synchronized(this) { closed = true }
+        unregisterDisconnectionHandler()
     }
 
     companion object {
@@ -344,18 +350,29 @@ internal class BluezConnectedGattClient(
                     valueAsBytes(value)?.let { trySend(it) }
                 }
             }
+            var registration: AutoCloseable? = null
+            val cleanupStarted = AtomicBoolean(false)
+            fun cleanup() {
+                if (!cleanupStarted.compareAndSet(false, true)) return
+                val registered = registration
+                BluezManager.runCleanup {
+                    runCatching { characteristic.stopNotify() }
+                    registered?.let { runCatching { it.close() } }
+                }
+            }
             try {
-                dm.registerPropertyHandler(handler)
+                registration = dm.dbusConnection.addBluezSigHandler(
+                    Properties.PropertiesChanged::class.java,
+                    handler,
+                )
                 withContext(Dispatchers.IO) { characteristic.startNotify() }
                 onSubscription?.invoke()
             } catch (e: Throwable) {
+                cleanup()
                 logger.e("error subscribing to $characteristicUuid", e)
                 close(e)
             }
-            awaitClose {
-                runCatching { characteristic.stopNotify() }
-                runCatching { dm.unRegisterPropertyHandler(handler) }
-            }
+            awaitClose(::cleanup)
         }
     }
 
