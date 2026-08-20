@@ -11,9 +11,10 @@ import org.freedesktop.dbus.types.UInt32
 import kotlin.time.Instant
 
 /** A narrow action which a native-Linux notification backend may execute. */
-enum class LinuxNotificationCommand {
-    Dismiss,
-    Open,
+sealed interface LinuxNotificationCommand {
+    data object Dismiss : LinuxNotificationCommand
+    data object Open : LinuxNotificationCommand
+    data class Reply(val text: String) : LinuxNotificationCommand
 }
 
 /** Desktop-independent notification data consumed by the native-Linux pipeline. */
@@ -23,6 +24,7 @@ data class LinuxNotification(
     val timestamp: Instant? = null,
     val content: MappedNotification,
     val hasDefaultAction: Boolean = false,
+    val hasReplyAction: Boolean = false,
 )
 
 sealed interface LinuxNotificationEvent {
@@ -118,6 +120,8 @@ class FreedesktopNotificationBackend(
                 val action = synchronized(lock) { defaultActions[id] } ?: return false
                 sessionCall(action.service, action.path, action.iface, action.method)
             }
+
+            is LinuxNotificationCommand.Reply -> false
         }
     }
 

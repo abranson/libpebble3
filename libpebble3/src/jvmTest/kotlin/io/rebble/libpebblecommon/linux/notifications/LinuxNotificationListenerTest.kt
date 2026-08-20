@@ -8,6 +8,7 @@ import io.rebble.libpebblecommon.connection.LibPebble
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.CustomTimelineActionHandler
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
+import io.rebble.libpebblecommon.database.entity.BaseAttribute
 import io.rebble.libpebblecommon.database.entity.TimelineNotification
 import io.rebble.libpebblecommon.database.entity.buildTimelineNotification
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
@@ -136,6 +137,79 @@ class LinuxNotificationListenerTest {
         assertNull(listener.activeNotification(libPebble.sent.single().itemId))
     }
 
+    @Test
+    fun replyActionUsesConfiguredCannedResponsesWithinFirmwareLimit() = runTest {
+        val eventsHandled = CompletableDeferred<Unit>()
+        val listener = listener(
+            scope = LibPebbleCoroutineScope(backgroundScope.coroutineContext),
+            backend = backend(eventsHandled) {
+                emit(posted("1", hasDefaultAction = true, hasReplyAction = true))
+            },
+            config = NotificationConfig(
+                cannedResponses = listOf("a".repeat(512), "must be omitted"),
+            ),
+            deviceActivity = LinuxDeviceActivity { false },
+        )
+        val libPebble = RecordingLibPebble()
+
+        listener.init(libPebble)
+        eventsHandled.await()
+
+        val notification = libPebble.sent.single()
+        assertEquals(
+            listOf(
+                TimelineItem.Action.Type.Dismiss,
+                TimelineItem.Action.Type.Response,
+                TimelineItem.Action.Type.Generic,
+                TimelineItem.Action.Type.Generic,
+            ),
+            notification.content.actions.map { it.type },
+        )
+        assertEquals(
+            listOf("a".repeat(512)),
+            notification.content.actions[1].attributes
+                .filterIsInstance<BaseAttribute.TextListAttribute>()
+                .single()
+                .text,
+        )
+        assertEquals(
+            "Reply",
+            notification.content.actions[1].attributes
+                .filterIsInstance<BaseAttribute.TextAttribute>()
+                .single()
+                .text,
+        )
+        assertEquals(
+            listOf(WatchAction.Dismiss, WatchAction.Reply, WatchAction.Open, WatchAction.MuteApp),
+            listener.activeNotification(notification.itemId)?.actions,
+        )
+    }
+
+    @Test
+    fun replacementWithNewReplyAuthorityIsSentAgain() = runTest {
+        val eventsHandled = CompletableDeferred<Unit>()
+        val listener = listener(
+            scope = LibPebbleCoroutineScope(backgroundScope.coroutineContext),
+            backend = backend(eventsHandled) {
+                emit(posted("1"))
+                emit(posted("2", replacesId = "1", hasReplyAction = true))
+            },
+            config = NotificationConfig(),
+            deviceActivity = LinuxDeviceActivity { false },
+        )
+        val libPebble = RecordingLibPebble()
+
+        listener.init(libPebble)
+        eventsHandled.await()
+
+        assertEquals(2, libPebble.sent.size)
+        assertEquals(listOf(libPebble.sent.first().itemId), libPebble.read)
+        assertEquals(
+            listOf(WatchAction.Dismiss, WatchAction.Reply, WatchAction.MuteApp),
+            listener.activeNotification(libPebble.sent.last().itemId)?.actions,
+        )
+    }
+
     private fun listener(
         scope: LibPebbleCoroutineScope,
         backend: LinuxNotificationBackend,
@@ -167,11 +241,15 @@ class LinuxNotificationListenerTest {
         replacesId: String? = null,
         packageName: String = "org.example.mail",
         title: String = "Sender",
+        hasDefaultAction: Boolean = false,
+        hasReplyAction: Boolean = false,
     ) = LinuxNotificationEvent.Posted(
         LinuxNotification(
             id = id,
             replacesId = replacesId,
             content = MappedNotification(title, "Message", packageName, "Mail"),
+            hasDefaultAction = hasDefaultAction,
+            hasReplyAction = hasReplyAction,
         )
     )
 

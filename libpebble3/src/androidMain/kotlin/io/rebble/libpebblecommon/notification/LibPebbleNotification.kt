@@ -14,6 +14,7 @@ import io.rebble.libpebblecommon.database.entity.buildTimelineNotification
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.notification.LibPebbleNotificationAction.ActionType
 import io.rebble.libpebblecommon.notification.NotificationDecision
 import io.rebble.libpebblecommon.notification.NotificationImage
+import io.rebble.libpebblecommon.notification.trimCannedResponses
 import io.rebble.libpebblecommon.notification.processor.NotificationProperties
 import io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute
 import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
@@ -155,22 +156,6 @@ data class LibPebbleNotification(
     }
 }
 
-private const val MAX_CANNED_RESPONSE_BYTES = 512
-
-/**
- * Trim the list to fit within the firmware's 512-byte serialized limit
- * (strings joined by NUL, encoded as UTF-8). Drops items from the end first.
- */
-private fun trimCannedResponses(responses: List<String>): List<String> {
-    var result = responses
-    while (result.isNotEmpty()) {
-        val serializedSize = result.joinToString("\u0000").encodeToByteArray().size
-        if (serializedSize <= MAX_CANNED_RESPONSE_BYTES) break
-        result = result.dropLast(1)
-    }
-    return result
-}
-
 fun LibPebbleNotification.toEntity(
     decision: NotificationDecision,
     channelId: String?,
@@ -190,4 +175,3 @@ fun NotificationResult.notification(): LibPebbleNotification? = when (this) {
     is NotificationResult.Extracted -> notification
     NotificationResult.NotProcessed -> null
 }
-
