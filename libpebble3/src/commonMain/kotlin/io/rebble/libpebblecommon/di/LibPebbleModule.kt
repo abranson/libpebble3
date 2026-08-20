@@ -456,7 +456,18 @@ fun initKoin(
                 factory<kotlin.time.Clock> { kotlin.time.Clock.System }
                 singleOf(::BlobDbDaos)
                 singleOf(::ActionOverrides)
-                singleOf(::PhoneCalendarSyncer)
+                single {
+                    PhoneCalendarSyncer(
+                        timelinePinDao = get(),
+                        calendarDao = get(),
+                        timeProvider = get(),
+                        systemCalendar = get(),
+                        libPebbleCoroutineScope = get(),
+                        timelineReminderDao = get(),
+                        watchConfig = get(),
+                        timelineWindowProvider = get(),
+                    )
+                }
                 singleOf(::MissedCallSyncer)
                 singleOf(::PhoneStatePlugin)
                 singleOf(::CalendarPlugin)

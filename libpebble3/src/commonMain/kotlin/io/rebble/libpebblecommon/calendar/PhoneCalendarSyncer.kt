@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.SystemAppIDs.CALENDAR_APP_UUID
 import io.rebble.libpebblecommon.WatchConfigFlow
 import io.rebble.libpebblecommon.connection.Calendar
+import io.rebble.libpebblecommon.connection.CalendarSyncOutcome
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimeProvider
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimelineWindowProvider
 import io.rebble.libpebblecommon.database.dao.CalendarDao
@@ -14,7 +15,12 @@ import io.rebble.libpebblecommon.database.entity.CalendarEntity
 import io.rebble.libpebblecommon.database.entity.TimelinePin
 import io.rebble.libpebblecommon.database.entity.TimelineReminder
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.conflate
@@ -25,6 +31,8 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -40,11 +48,14 @@ class PhoneCalendarSyncer(
     private val watchConfig: WatchConfigFlow,
     private val vibePatternDao: VibePatternDao,
     private val timelineWindowProvider: TimelineWindowProvider,
+    private val retryDelay: Duration = 1.minutes,
 ) : Calendar {
     private val logger = Logger.withTag("PhoneCalendarSyncer")
     private val syncTrigger = MutableSharedFlow<Unit>()
     private var changesFlow: Flow<Unit>? = null
     private val changesJobMutex = Mutex()
+    private val reconciliationMutex = Mutex()
+    private var retryJob: Job? = null
 
     fun init() {
         logger.v { "init()" }
@@ -99,41 +110,83 @@ class PhoneCalendarSyncer(
         syncTrigger.emit(Unit)
     }
 
-    private suspend fun syncDeviceCalendarsToDb() {
+    internal suspend fun syncDeviceCalendarsToDb() {
+        try {
+            syncCalendars()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (systemCalendar.hasPermission()) {
+                logger.w(e) { "Calendar sync failed; retrying without treating it as empty" }
+                scheduleRetry()
+            } else {
+                logger.w(e) { "Calendar source access is unavailable; preserving the projection" }
+            }
+        }
+    }
+
+    override suspend fun syncCalendars(
+        beginCommit: () -> Boolean,
+    ): CalendarSyncOutcome = reconciliationMutex.withLock {
+        val result = reconcileDeviceCalendarsToDb(beginCommit)
+        retryJob?.cancel()
+        retryJob = null
+        result
+    }
+
+    private fun scheduleRetry() {
+        if (retryJob?.isActive == true) return
+        retryJob = libPebbleCoroutineScope.launch {
+            delay(retryDelay)
+            requestSync()
+        }
+    }
+
+    private suspend fun reconcileDeviceCalendarsToDb(
+        beginCommit: () -> Boolean,
+    ): CalendarSyncOutcome {
         val pinsEnabled = watchConfig.value.calendarPins
         val remindersEnabled = watchConfig.value.calendarReminders
         val showDeclinedEvents = watchConfig.value.calendarShowDeclinedEvents
         logger.d("syncDeviceCalendarsToDb remindersEnabled=$remindersEnabled showDeclinedEvents=$showDeclinedEvents")
         val existingCalendars = calendarDao.getAll()
-        val calendars = systemCalendar.getCalendars()
-        logger.d("Got ${calendars.size} calendars from device, syncing... (${existingCalendars.size} existing)")
-        val removedCalendars = existingCalendars.filter { existing ->
-            calendars.none { it.platformId == existing.platformId }
-        }
-        existingCalendars.forEach { existingCalendar ->
-            val matchingCalendar = calendars.find { it.platformId == existingCalendar.platformId }
-            if (matchingCalendar != null) {
-                val updateCal = existingCalendar.copy(
-                    platformId = matchingCalendar.platformId,
-                    name = matchingCalendar.name,
-                    ownerName = matchingCalendar.ownerName,
-                    ownerId = matchingCalendar.ownerId,
-                    color = matchingCalendar.color,
-                    syncEvents = matchingCalendar.syncEvents,
-                    visible = matchingCalendar.visible,
-                )
-                calendarDao.update(updateCal)
-            } else {
-                calendarDao.delete(existingCalendar)
-            }
-        }
-        calendars.forEach { newCalendar ->
-            if (existingCalendars.none { it.platformId == newCalendar.platformId }) {
-                calendarDao.insertOrReplace(newCalendar.inheritEnabledFrom(removedCalendars))
-            }
+        val sourceCalendars = systemCalendar.getCalendars()
+        if (!systemCalendar.hasPermission()) {
+            logger.i { "Calendar source is unavailable; preserving the existing projection" }
+            return CalendarSyncOutcome.SourceUnavailable
         }
 
-        val allCalendars = calendarDao.getAll()
+        val removedCalendars = existingCalendars.filter { existing ->
+            sourceCalendars.none { it.platformId == existing.platformId }
+        }
+        val existingByPlatformId = existingCalendars.associateBy { it.platformId }
+        val desiredCalendars = sourceCalendars.map { sourceCalendar ->
+            existingByPlatformId[sourceCalendar.platformId]?.copy(
+                platformId = sourceCalendar.platformId,
+                name = sourceCalendar.name,
+                ownerName = sourceCalendar.ownerName,
+                ownerId = sourceCalendar.ownerId,
+                color = sourceCalendar.color,
+                syncEvents = sourceCalendar.syncEvents,
+                visible = sourceCalendar.visible,
+            ) ?: sourceCalendar.inheritEnabledFrom(removedCalendars)
+        }
+        logger.d(
+            "Got ${desiredCalendars.size} calendars from device, staging sync " +
+                "(${existingCalendars.size} existing)",
+        )
+
+        val calendarsToUpdate = desiredCalendars.filter { desiredCalendar ->
+            val existingCalendar = existingByPlatformId[desiredCalendar.platformId]
+            existingCalendar != null && existingCalendar != desiredCalendar
+        }
+        val calendarsToInsert = desiredCalendars.filter { desiredCalendar ->
+            desiredCalendar.platformId !in existingByPlatformId
+        }
+        val calendarsToDelete = existingCalendars.filter { existingCalendar ->
+            desiredCalendars.none { it.platformId == existingCalendar.platformId }
+        }
+
         val existingPins = timelinePinDao.getPinsForWatchapp(CALENDAR_APP_UUID)
         val timelineWindow = timelineWindowProvider.sourceWindow.value
         val now = timeProvider.now()
@@ -141,7 +194,8 @@ class PhoneCalendarSyncer(
         val endDate = now + timelineWindow.futureDays.days
         val calendarVibePattern = watchConfig.value.overrideCalendarVibePattern
             ?.let { vibePatternDao.getVibePattern(it)?.pattern }
-        val newPins = allCalendars.flatMap { calendar ->
+        val supportsRsvp = pinsEnabled && systemCalendar.supportsPinActions()
+        val newPins = desiredCalendars.flatMap { calendar ->
             if (!calendar.enabled || !pinsEnabled) {
                 return@flatMap emptyList()
             }
@@ -151,17 +205,17 @@ class PhoneCalendarSyncer(
                     val currentUserAttendee = event.attendees.find { it.isCurrentUser }
                     currentUserAttendee?.attendanceStatus != EventAttendee.AttendanceStatus.Declined
                 }
-            val supportsRsvp = systemCalendar.supportsPinActions()
             events.map { event ->
                 EventAndPin(event, event.toTimelinePin(calendar, supportsRsvp))
             }
         }
         val remindersToInsert = mutableListOf<TimelineReminder>()
         val remindersToDelete = mutableListOf<Uuid>()
+        var reminderCount = 0
         val toInsert = newPins.mapNotNull { new ->
             val newPin = new.pin
             val existingPin = existingPins.find { it.backingId == newPin.backingId }
-            syncReminders(
+            reminderCount += syncReminders(
                 remindersEnabled = remindersEnabled,
                 event = new.event,
                 pinId = existingPin?.itemId ?: newPin.itemId,
@@ -179,10 +233,6 @@ class PhoneCalendarSyncer(
             logger.d("New Pin: ${newPin.itemId} (existed: ${existingPin != null})")
             return@mapNotNull pin
         }
-        if (toInsert.isNotEmpty()) {
-            timelinePinDao.insertOrReplace(toInsert)
-        }
-
         val pinsToDelete = existingPins.filter { pin ->
             if (newPins.none { it.pin.backingId == pin.backingId }) {
                 logger.d("Deleting pin ${pin.itemId} (backingId: ${pin.backingId}) as no longer exists in calendar")
@@ -191,19 +241,32 @@ class PhoneCalendarSyncer(
                 false
             }
         }
-        if (pinsToDelete.isNotEmpty()) {
-            timelinePinDao.markAllForDeletionWithReminders(
-                pinsToDelete.map { it.itemId },
-                timelineReminderDao
+
+        // Platform reads can fail or be cancelled. Cross the mutation boundary only after the
+        // complete source snapshot and every comparison read have succeeded, then finish the
+        // durable reconciliation even if the caller is cancelled while Room is applying it.
+        currentCoroutineContext().ensureActive()
+        if (!beginCommit()) throw CancellationException("calendar sync cancelled before commit")
+        withContext(NonCancellable) {
+            calendarDao.applyProjection(
+                calendarsToUpdate = calendarsToUpdate,
+                calendarsToDelete = calendarsToDelete,
+                calendarsToInsert = calendarsToInsert,
+                pinsToInsert = toInsert,
+                pinIdsToDelete = pinsToDelete.map { it.itemId },
+                remindersToInsert = remindersToInsert,
+                reminderIdsToDelete = remindersToDelete,
+                timelinePinDao = timelinePinDao,
+                timelineReminderDao = timelineReminderDao,
             )
         }
-        if (remindersToInsert.isNotEmpty()) {
-            timelineReminderDao.insertOrReplace(remindersToInsert)
-        }
-        if (remindersToDelete.isNotEmpty()) {
-            timelineReminderDao.markAllForDeletion(remindersToDelete)
-        }
-        logger.d("Synced ${allCalendars.size} calendars to DB")
+        logger.d("Synced ${desiredCalendars.size} calendars to DB")
+        return CalendarSyncOutcome.Completed(
+            calendarCount = desiredCalendars.size,
+            eventCount = newPins.size,
+            reminderCount = reminderCount,
+            calendarEnabled = pinsEnabled,
+        )
     }
 
     private suspend fun syncReminders(
@@ -213,7 +276,7 @@ class PhoneCalendarSyncer(
         vibePattern: List<UInt>?,
         remindersToInsert: MutableList<TimelineReminder>,
         remindersToDelete: MutableList<Uuid>,
-    ) {
+    ): Int {
         val existingReminders = timelineReminderDao.getRemindersForPin(pinId)
         val desiredReminders = if (remindersEnabled) {
             event.reminders.map { reminder ->
@@ -241,6 +304,7 @@ class PhoneCalendarSyncer(
                 else -> null
             }
         }
+        return desiredReminders.size
     }
 
     override fun calendars(): Flow<List<CalendarEntity>> = calendarDao.getFlow()
@@ -250,12 +314,14 @@ class PhoneCalendarSyncer(
 
     override fun updateCalendarEnabled(calendarId: Int, enabled: Boolean) {
         libPebbleCoroutineScope.launch {
-            calendarDao.setEnabled(calendarId, enabled)
-            val calendar = calendarDao.getAll().find { it.id == calendarId }
-            // A calendar only actually downloads events to the provider when it's both syncing and
-            // visible; repair either flag if missing (enableSyncForCalendar sets both).
-            if (calendar != null && (!calendar.syncEvents || !calendar.visible)) {
-                systemCalendar.enableSyncForCalendar(calendar)
+            reconciliationMutex.withLock {
+                calendarDao.setEnabled(calendarId, enabled)
+                val calendar = calendarDao.getAll().find { it.id == calendarId }
+                // A calendar only actually downloads events to the provider when it's both syncing
+                // and visible; repair either flag if missing (enableSyncForCalendar sets both).
+                if (calendar != null && (!calendar.syncEvents || !calendar.visible)) {
+                    systemCalendar.enableSyncForCalendar(calendar)
+                }
             }
             requestSync()
         }

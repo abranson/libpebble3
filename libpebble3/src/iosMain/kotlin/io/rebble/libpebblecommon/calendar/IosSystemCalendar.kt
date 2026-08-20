@@ -76,7 +76,8 @@ class IosSystemCalendar(
     }
 
     override suspend fun getCalendars(): List<CalendarEntity> {
-        val ek = eventStore() ?: return emptyList()
+        val ek = eventStore()
+            ?: throw IllegalStateException("Calendar event store is unavailable while listing calendars")
         val calendars =
             ek.calendarsForEntityType(EKEntityType.EKEntityTypeEvent) as List<EKCalendar>
         return calendars.map {
@@ -96,11 +97,12 @@ class IosSystemCalendar(
         startDate: Instant,
         endDate: Instant
     ): List<CalendarEvent> {
-        val ek = eventStore() ?: return emptyList()
+        val ek = eventStore()
+            ?: throw IllegalStateException("Calendar event store is unavailable while querying events")
         val cal = ek.calendarWithIdentifier(calendar.platformId)
         if (cal == null) {
             logger.e { "Couldn't find calendar $calendar to query events" }
-            return emptyList()
+            throw IllegalStateException("Calendar ${calendar.platformId} is unavailable while querying events")
         }
         val predicate = ek.predicateForEventsWithStartDate(
             startDate.toNSDate(),
@@ -109,21 +111,25 @@ class IosSystemCalendar(
         )
         val events = ek.eventsMatchingPredicate(predicate) as List<EKEvent>
         val timeZone = TimeZone.currentSystemDefault()
-        return events.mapNotNull {
-            val id = it.eventIdentifier ?: return@mapNotNull null
-            val title = it.title ?: return@mapNotNull null
-            val description = it.notes ?: ""
-            val location = it.location ?: ""
-            // EventKit gives all-day events at local midnight; the watch wants the bare date.
-            val start = it.startDate?.toKotlinInstant()
-                ?.let { s -> if (it.allDay) s.anchorAllDayToUtc(timeZone) else s }
-                ?: return@mapNotNull null
-            val end = it.endDate?.toKotlinInstant()
-                ?.let { e -> if (it.allDay) e.anchorAllDayToUtc(timeZone) else e }
-                ?: return@mapNotNull null
-            val attendees = it.attendees as? List<EKParticipant> ?: emptyList()
-            val alarms = it.alarms as? List<EKAlarm> ?: emptyList()
-            val availability = when (it.availability) {
+        return events.map { event ->
+            val id = event.eventIdentifier
+                ?: throw IllegalStateException("Calendar provider returned an event without an ID")
+            val title = event.title ?: "Untitled event"
+            val description = event.notes ?: ""
+            val location = event.location ?: ""
+            val start = event.startDate?.toKotlinInstant()?.let { if (event.allDay) it.anchorAllDayToUtc(timeZone) else it }
+                ?: throw IllegalStateException("Calendar provider returned an event without a start")
+            val end = event.endDate?.toKotlinInstant()?.let { if (event.allDay) it.anchorAllDayToUtc(timeZone) else it }
+                ?: throw IllegalStateException("Calendar provider returned an event without an end")
+            val attendees = event.attendees?.let {
+                it as? List<EKParticipant>
+                    ?: throw IllegalStateException("Calendar provider returned malformed attendees")
+            } ?: emptyList()
+            val alarms = event.alarms?.let {
+                it as? List<EKAlarm>
+                    ?: throw IllegalStateException("Calendar provider returned malformed alarms")
+            } ?: emptyList()
+            val availability = when (event.availability) {
                 EKEventAvailabilityBusy -> CalendarEvent.Availability.Busy
                 EKEventAvailabilityFree -> CalendarEvent.Availability.Free
                 EKEventAvailabilityNotSupported -> CalendarEvent.Availability.Unavailable
@@ -131,7 +137,7 @@ class IosSystemCalendar(
                 EKEventAvailabilityUnavailable -> CalendarEvent.Availability.Unavailable
                 else -> CalendarEvent.Availability.Unavailable
             }
-            val status = when (it.status) {
+            val status = when (event.status) {
                 EKEventStatusCanceled -> CalendarEvent.Status.Cancelled
                 EKEventStatusConfirmed -> CalendarEvent.Status.Confirmed
                 EKEventStatusNone -> CalendarEvent.Status.None
@@ -146,9 +152,9 @@ class IosSystemCalendar(
                 location = location,
                 startTime = start,
                 endTime = end,
-                allDay = it.allDay,
+                allDay = event.allDay,
                 attendees = attendees.map { it.asAttendee() },
-                recurs = it.hasRecurrenceRules,
+                recurs = event.hasRecurrenceRules,
                 reminders = alarms.map { it.asReminder() },
                 availability = availability,
                 status = status,

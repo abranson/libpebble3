@@ -65,6 +65,7 @@ import io.rebble.libpebblecommon.services.appmessage.AppMessageResult
 import io.rebble.libpebblecommon.util.GeolocationPositionResult
 import io.rebble.libpebblecommon.weather.WeatherLocationData
 import io.rebble.libpebblecommon.web.LockerEntry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.flow.Flow
@@ -337,6 +338,16 @@ class FakeLibPebble : LibPebble {
 
     override fun updateCalendarEnabled(calendarId: Int, enabled: Boolean) {
         // No-op
+    }
+
+    override suspend fun syncCalendars(beginCommit: () -> Boolean): CalendarSyncOutcome {
+        if (!beginCommit()) throw CancellationException("calendar sync cancelled before commit")
+        return CalendarSyncOutcome.Completed(
+            calendarCount = 0,
+            eventCount = 0,
+            reminderCount = 0,
+            calendarEnabled = config.value.watchConfig.calendarPins,
+        )
     }
 
     override suspend fun createEvent(event: NewCalendarEvent): String? = null

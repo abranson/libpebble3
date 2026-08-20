@@ -253,45 +253,49 @@ private fun resolveAttendees(
         arrayOf(eventId.toString()),
         null
     )?.use { cursor ->
-        buildList {
-            while (cursor.moveToNext()) {
-                val name = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_NAME)
-                    ?.let { cursor.getString(it) }
-                val email = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_EMAIL)
-                    ?.let { cursor.getString(it) }
-                val type = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_TYPE)
-                    ?.let { cursor.getInt(it) } ?: continue
-                val status =
-                    cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_STATUS)
-                        ?.let { cursor.getInt(it) } ?: continue
-                val relationship =
-                    cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_RELATIONSHIP)
-                        ?.let { cursor.getInt(it) } ?: continue
+        val attendees = mutableListOf<EventAttendee>()
+        while (cursor.moveToNext()) {
+            cursor.getNullableColumnIndex(CalendarContract.Attendees._ID)
+                ?: throw IllegalStateException("Calendar provider returned a malformed attendee")
+            cursor.getNullableColumnIndex(CalendarContract.Attendees.EVENT_ID)
+                ?: throw IllegalStateException("Calendar provider returned a malformed attendee")
+            val name = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_NAME)
+                ?.let { cursor.getString(it) }
+            val email = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_EMAIL)
+                ?.let { cursor.getString(it) }
+            val type = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_TYPE)
+                ?.let { cursor.getInt(it) }
+                ?: throw IllegalStateException("Calendar provider returned a malformed attendee")
+            val status = cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_STATUS)
+                ?.let { cursor.getInt(it) }
+                ?: throw IllegalStateException("Calendar provider returned a malformed attendee")
+            val relationship =
+                cursor.getNullableColumnIndex(CalendarContract.Attendees.ATTENDEE_RELATIONSHIP)
+                    ?.let { cursor.getInt(it) }
+                    ?: throw IllegalStateException("Calendar provider returned a malformed attendee")
 
-                add(
-                    EventAttendee(
-                        name = name,
-                        email = email,
-                        role = when (type) {
-                            CalendarContract.Attendees.TYPE_REQUIRED -> EventAttendee.Role.Required
-                            CalendarContract.Attendees.TYPE_OPTIONAL -> EventAttendee.Role.Optional
-                            CalendarContract.Attendees.TYPE_RESOURCE -> EventAttendee.Role.Resource
-                            else -> EventAttendee.Role.None
-                        },
-                        isOrganizer = relationship == CalendarContract.Attendees.RELATIONSHIP_ORGANIZER,
-                        isCurrentUser = email != null && email == ownerEmail,
-                        attendanceStatus = when (status) {
-                            CalendarContract.Attendees.ATTENDEE_STATUS_ACCEPTED -> EventAttendee.AttendanceStatus.Accepted
-                            CalendarContract.Attendees.ATTENDEE_STATUS_DECLINED -> EventAttendee.AttendanceStatus.Declined
-                            CalendarContract.Attendees.ATTENDEE_STATUS_INVITED -> EventAttendee.AttendanceStatus.Invited
-                            CalendarContract.Attendees.ATTENDEE_STATUS_TENTATIVE -> EventAttendee.AttendanceStatus.Tentative
-                            else -> EventAttendee.AttendanceStatus.None
-                        }
-                    )
-                )
-            }
+            attendees += EventAttendee(
+                name = name,
+                email = email,
+                role = when (type) {
+                    CalendarContract.Attendees.TYPE_REQUIRED -> EventAttendee.Role.Required
+                    CalendarContract.Attendees.TYPE_OPTIONAL -> EventAttendee.Role.Optional
+                    CalendarContract.Attendees.TYPE_RESOURCE -> EventAttendee.Role.Resource
+                    else -> EventAttendee.Role.None
+                },
+                isOrganizer = relationship == CalendarContract.Attendees.RELATIONSHIP_ORGANIZER,
+                isCurrentUser = email != null && email == ownerEmail,
+                attendanceStatus = when (status) {
+                    CalendarContract.Attendees.ATTENDEE_STATUS_ACCEPTED -> EventAttendee.AttendanceStatus.Accepted
+                    CalendarContract.Attendees.ATTENDEE_STATUS_DECLINED -> EventAttendee.AttendanceStatus.Declined
+                    CalendarContract.Attendees.ATTENDEE_STATUS_INVITED -> EventAttendee.AttendanceStatus.Invited
+                    CalendarContract.Attendees.ATTENDEE_STATUS_TENTATIVE -> EventAttendee.AttendanceStatus.Tentative
+                    else -> EventAttendee.AttendanceStatus.None
+                },
+            )
         }
-    } ?: listOf()
+        attendees
+    } ?: throw IllegalStateException("Calendar provider returned no attendee cursor")
 }
 
 private fun resolveReminders(eventId: Long, contentResolver: ContentResolver): List<EventReminder> {
@@ -302,14 +306,21 @@ private fun resolveReminders(eventId: Long, contentResolver: ContentResolver): L
         arrayOf(eventId.toString()),
         null
     )?.use { cursor ->
-        buildList {
-            while (cursor.moveToNext()) {
-                val minutes = cursor.getNullableColumnIndex(CalendarContract.Reminders.MINUTES)
-                    ?.let { cursor.getInt(it) } ?: continue
-                add(EventReminder(minutesBefore = minutes))
-            }
+        val reminders = mutableListOf<EventReminder>()
+        while (cursor.moveToNext()) {
+            cursor.getNullableColumnIndex(CalendarContract.Reminders._ID)
+                ?: throw IllegalStateException("Calendar provider returned a malformed reminder")
+            cursor.getNullableColumnIndex(CalendarContract.Reminders.EVENT_ID)
+                ?: throw IllegalStateException("Calendar provider returned a malformed reminder")
+            val minutes = cursor.getNullableColumnIndex(CalendarContract.Reminders.MINUTES)
+                ?.let { cursor.getInt(it) }
+                ?: throw IllegalStateException("Calendar provider returned a malformed reminder")
+            cursor.getNullableColumnIndex(CalendarContract.Reminders.METHOD)
+                ?: throw IllegalStateException("Calendar provider returned a malformed reminder")
+            reminders += EventReminder(minutesBefore = minutes)
         }
-    } ?: listOf()
+        reminders
+    } ?: throw IllegalStateException("Calendar provider returned no reminder cursor")
 }
 
 private val logger = Logger.withTag("AndroidSystemCalendar")
@@ -329,22 +340,23 @@ class AndroidSystemCalendar(
                             val id = cursor.getNullableColumnIndex(CalendarContract.Calendars._ID)
                                 ?.let { cursor.getLong(it) }
                             if (id == null) {
-                                logger.w("Calendar has no ID")
-                                continue
+                                throw IllegalStateException("Calendar provider returned a calendar without an ID")
                             }
                             val accountName =
                                 cursor.getNullableColumnIndex(CalendarContract.Calendars.ACCOUNT_NAME)
                                     ?.let { cursor.getString(it) }
                             if (accountName == null) {
-                                logger.w("Calendar has no accountName")
-                                continue
+                                throw IllegalStateException(
+                                    "Calendar provider returned a calendar without an account name",
+                                )
                             }
                             val displayName =
                                 cursor.getNullableColumnIndex(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
                                     ?.let { cursor.getString(it) }
                             if (displayName == null) {
-                                logger.w("Calendar has no displayName")
-                                continue
+                                throw IllegalStateException(
+                                    "Calendar provider returned a calendar without a display name",
+                                )
                             }
                             val ownerAccount =
                                 cursor.getNullableColumnIndex(CalendarContract.Calendars.OWNER_ACCOUNT)
@@ -356,8 +368,9 @@ class AndroidSystemCalendar(
                                 cursor.getNullableColumnIndex(CalendarContract.Calendars.CALENDAR_COLOR)
                                     ?.let { cursor.getInt(it) }
                             if (color == null) {
-                                logger.w("Calendar has no color")
-                                continue
+                                throw IllegalStateException(
+                                    "Calendar provider returned a calendar without a color",
+                                )
                             }
                             val syncEvents =
                                 cursor.getNullableColumnIndex(CalendarContract.Calendars.SYNC_EVENTS)
@@ -379,11 +392,11 @@ class AndroidSystemCalendar(
                                 )
                             )
                         }
-                    }
-                } ?: emptyList()
+                    }.toList()
+                } ?: throw IllegalStateException("Calendar provider returned no calendar cursor")
         } catch (e: SecurityException) {
             logger.e(e) { "Error syncing calendars"}
-            emptyList()
+            throw e
         }
     }
 
@@ -397,22 +410,28 @@ class AndroidSystemCalendar(
         ContentUris.appendId(uriBuilder, endDate.toEpochMilliseconds())
         val builtUri = uriBuilder.build()
 
-        val result = contentResolver.query(
-            builtUri, instanceProjection,
-            "${CalendarContract.Instances.CALENDAR_ID} = ?"
-                    + " AND IFNULL(" + CalendarContract.Instances.STATUS + ", " + CalendarContract.Instances.STATUS_TENTATIVE + ") != " + CalendarContract.Instances.STATUS_CANCELED,
-            arrayOf(calendar.platformId), "BEGIN ASC"
-        )?.use { cursor ->
-            logger.d("Found ${cursor.count} events for calendar ${calendar.platformId}/${calendar.name.obfuscate(privateLogger)}")
-            val list = mutableListOf<CalendarEvent>()
-            while (cursor.moveToNext()) {
-                val event = resolveCalendarInstance(contentResolver, cursor, calendar.ownerId)
-                if (event != null) {
+        val result = try {
+            contentResolver.query(
+                builtUri, instanceProjection,
+                "${CalendarContract.Instances.CALENDAR_ID} = ?"
+                        + " AND IFNULL(" + CalendarContract.Instances.STATUS + ", " + CalendarContract.Instances.STATUS_TENTATIVE + ") != " + CalendarContract.Instances.STATUS_CANCELED,
+                arrayOf(calendar.platformId), "BEGIN ASC"
+            )?.use { cursor ->
+                logger.d("Found ${cursor.count} events for calendar ${calendar.name.obfuscate(privateLogger)}")
+                val list = mutableListOf<CalendarEvent>()
+                while (cursor.moveToNext()) {
+                    val event = resolveCalendarInstance(contentResolver, cursor, calendar.ownerId)
+                        ?: throw IllegalStateException(
+                            "Calendar provider returned a malformed event instance",
+                        )
                     list.add(event)
                 }
-            }
-            list
-        } ?: listOf()
+                list
+            } ?: throw IllegalStateException("Calendar provider returned no event cursor")
+        } catch (e: SecurityException) {
+            logger.e(e) { "Error querying calendar events" }
+            throw e
+        }
         return result
     }
 
