@@ -14,6 +14,7 @@ import io.rebble.libpebblecommon.database.entity.buildTimelineNotification
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.notification.LibPebbleNotificationAction.ActionType
 import io.rebble.libpebblecommon.notification.NotificationDecision
 import io.rebble.libpebblecommon.notification.NotificationImage
+import io.rebble.libpebblecommon.notification.trimCannedResponses
 import io.rebble.libpebblecommon.notification.processor.NotificationProperties
 import io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute
 import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
@@ -178,4 +179,3 @@ fun NotificationResult.notification(): LibPebbleNotification? = when (this) {
     is NotificationResult.Extracted -> notification
     NotificationResult.NotProcessed -> null
 }
-

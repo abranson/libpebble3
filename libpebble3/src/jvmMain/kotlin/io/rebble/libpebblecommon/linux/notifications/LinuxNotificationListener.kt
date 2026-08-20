@@ -14,6 +14,7 @@ import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import io.rebble.libpebblecommon.NotificationConfigFlow
 import io.rebble.libpebblecommon.linux.LinuxDeviceActivity
 import io.rebble.libpebblecommon.notification.NotificationListenerConnection
+import io.rebble.libpebblecommon.notification.trimCannedResponses
 import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
 import io.rebble.libpebblecommon.util.toPebbleColor
 import kotlinx.coroutines.launch
@@ -25,6 +26,7 @@ import kotlin.uuid.Uuid
 /** What to do when the watch invokes action N on a notification (indexed by actionId). */
 sealed class WatchAction {
     data object Dismiss : WatchAction()
+    data object Reply : WatchAction()
     data object MuteApp : WatchAction()
     data object Open : WatchAction()
 }
@@ -180,7 +182,8 @@ class LinuxNotificationListener(
         }
         if (replaced != null && replaced.packageName == mapped.packageName &&
             replaced.title == mapped.title && replaced.body == mapped.body &&
-            (WatchAction.Open in replaced.actions) == n.hasDefaultAction
+            (WatchAction.Open in replaced.actions) == n.hasDefaultAction &&
+            (WatchAction.Reply in replaced.actions) == n.hasReplyAction
         ) {
             // Same content re-posted (e.g. progress/hint update): nothing new for the watch.
             tracker.remap(replaced.itemId, replaced.notificationId, n.id)
@@ -215,6 +218,15 @@ class LinuxNotificationListener(
                     attributes { title { "Dismiss" } }
                 }
                 watchActions += WatchAction.Dismiss
+                if (n.hasReplyAction) {
+                    action(TimelineItem.Action.Type.Response) {
+                        attributes {
+                            title { "Reply" }
+                            cannedResponse { trimCannedResponses(notificationConfig.value.cannedResponses) }
+                        }
+                    }
+                    watchActions += WatchAction.Reply
+                }
                 if (n.hasDefaultAction) {
                     action(TimelineItem.Action.Type.Generic) {
                         attributes { title { "Open on phone" } }
