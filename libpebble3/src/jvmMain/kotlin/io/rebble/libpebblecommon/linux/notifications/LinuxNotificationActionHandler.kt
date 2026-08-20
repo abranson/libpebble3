@@ -5,23 +5,19 @@ import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNot
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.entity.BaseAction
 import io.rebble.libpebblecommon.database.entity.MuteState
-import io.rebble.libpebblecommon.linux.dbus.RawSessionConnection
 import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
 import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
 import io.rebble.libpebblecommon.services.blobdb.TimelineActionResult
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.freedesktop.dbus.types.UInt32
 import kotlin.uuid.Uuid
 
 /**
- * Executes watch-side notification actions on the host: dismiss closes the notification via the
- * standard org.freedesktop.Notifications API, mute updates the app's mute state, and "open on
- * phone" invokes whatever [RemoteAction] the desktop's [NotificationHintMapper] supplied.
+ * Executes watch-side notification actions through the same native-Linux
+ * backend that supplied the notification. Mute remains local database policy.
  */
 class LinuxNotificationActionHandler(
     private val listener: LinuxNotificationListener,
     private val notificationAppDao: NotificationAppRealDao,
+    private val backend: LinuxNotificationBackend,
 ) : PlatformNotificationActionHandler {
     private val logger = Logger.withTag("LinuxNotificationActionHandler")
 
@@ -41,16 +37,12 @@ class LinuxNotificationActionHandler(
         return when (watchAction) {
             WatchAction.Dismiss -> dismiss(active)
             WatchAction.MuteApp -> muteApp(active)
-            is WatchAction.Remote -> invokeRemote(watchAction.action)
+            WatchAction.Open -> execute(active, LinuxNotificationCommand.Open)
         }
     }
 
     private suspend fun dismiss(active: ActiveNotification): TimelineActionResult {
-        val ok = sessionCall(
-            NOTIFICATIONS_SERVICE, NOTIFICATIONS_PATH,
-            NOTIFICATIONS_IFACE, "CloseNotification",
-            "u", UInt32(active.dbusId.toLong()),
-        )
+        val ok = backend.execute(active.notificationId, LinuxNotificationCommand.Dismiss)
         if (ok) listener.remove(active.itemId)
         return if (ok) {
             TimelineActionResult(success = true, icon = TimelineIcon.ResultDismissed, title = "Dismissed")
@@ -64,8 +56,11 @@ class LinuxNotificationActionHandler(
         return TimelineActionResult(success = true, icon = TimelineIcon.ResultMute, title = "Muted")
     }
 
-    private suspend fun invokeRemote(action: RemoteAction): TimelineActionResult {
-        val ok = sessionCall(action.service, action.path, action.iface, action.method)
+    private suspend fun execute(
+        active: ActiveNotification,
+        command: LinuxNotificationCommand,
+    ): TimelineActionResult {
+        val ok = backend.execute(active.notificationId, command)
         return if (ok) {
             TimelineActionResult(success = true, icon = TimelineIcon.GenericConfirmation, title = "Opened")
         } else {
@@ -73,31 +68,6 @@ class LinuxNotificationActionHandler(
         }
     }
 
-    private suspend fun sessionCall(
-        destination: String,
-        path: String,
-        iface: String,
-        member: String,
-        signature: String? = null,
-        vararg args: Any,
-    ): Boolean = withContext(Dispatchers.IO) {
-        RawSessionConnection.connect()?.use { conn ->
-            try {
-                conn.call(destination, path, iface, member, signature, *args)
-                true
-            } catch (e: Exception) {
-                logger.e("$iface.$member failed", e)
-                false
-            }
-        } ?: false
-    }
-
     private fun failed() =
         TimelineActionResult(success = false, icon = TimelineIcon.ResultFailed, title = "Failed")
-
-    private companion object {
-        private const val NOTIFICATIONS_SERVICE = "org.freedesktop.Notifications"
-        private const val NOTIFICATIONS_PATH = "/org/freedesktop/Notifications"
-        private const val NOTIFICATIONS_IFACE = "org.freedesktop.Notifications"
-    }
 }

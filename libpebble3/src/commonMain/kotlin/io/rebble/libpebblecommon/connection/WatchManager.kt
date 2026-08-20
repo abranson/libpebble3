@@ -2,6 +2,8 @@ package io.rebble.libpebblecommon.connection
 
 import co.touchlab.kermit.Logger
 import com.russhwolf.settings.Settings
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import io.rebble.libpebblecommon.LibPebbleAnalytics
 import io.rebble.libpebblecommon.WatchConfigFlow
 import io.rebble.libpebblecommon.connection.bt.BluetoothState
@@ -14,6 +16,7 @@ import io.rebble.libpebblecommon.database.MillisecondInstant
 import io.rebble.libpebblecommon.database.asMillisecond
 import io.rebble.libpebblecommon.database.dao.KnownWatchDao
 import io.rebble.libpebblecommon.database.entity.KnownWatchItem
+import io.rebble.libpebblecommon.database.entity.TransportType
 import io.rebble.libpebblecommon.database.entity.identifier
 import io.rebble.libpebblecommon.database.entity.type
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
@@ -29,10 +32,13 @@ import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
 import io.rebble.libpebblecommon.services.WatchInfo
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +57,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
@@ -208,13 +215,24 @@ class WatchManager(
     override val watches: StateFlow<List<PebbleDevice>> = _watches.asStateFlow()
     private val _connectionEvents = MutableSharedFlow<PebbleConnectionEvent>(extraBufferCapacity = 5)
     override val connectionEvents: Flow<PebbleConnectionEvent> = _connectionEvents.asSharedFlow()
+    /**
+     * Orders daemon connection-goal publication and retirement against [connectTo].
+     *
+     * A caller which clears a goal while holding this monitor can rely on an older collector
+     * snapshot never creating a new connection after the clear returns.  This is deliberately a
+     * narrow internal guarantee; the portable [Watches] API keeps its asynchronous semantics.
+     */
+    private val connectionGoalLock = SynchronizedObject()
     private val activeConnections = mutableSetOf<PebbleIdentifier>()
     private var connectionNum = 0
     private val timeInitialized = clock.now()
 
-    override fun watchesDebugState(): String = "allWatches=${allWatches.value.entries.joinToString("\n")}\n" +
-            "activeConnections=$activeConnections\n" +
+    override fun watchesDebugState(): String {
+        val active = synchronized(connectionGoalLock) { activeConnections.toSet() }
+        return "allWatches=${allWatches.value.entries.joinToString("\n")}\n" +
+            "activeConnections=$active\n" +
             "btState=${bluetoothStateProvider.state.value}"
+    }
 
     override fun setNickname(
         identifier: PebbleIdentifier,
@@ -229,65 +247,248 @@ class WatchManager(
 
     private val seedBondedMutex = Mutex()
 
+    /**
+     * Import OS-bonded watches even when automatic fresh-install seeding has already run.
+     * [beginCommit] arbitrates cancellation against the first irreversible database write.
+     */
+    suspend fun importBondedWatches(
+        beginCommit: () -> Boolean,
+    ): BondedWatchImportOutcome = seedBondedMutex.withLock {
+        val candidates = bondedWatchCandidates(appContext)
+            ?: return@withLock BondedWatchImportOutcome.Unavailable
+        currentCoroutineContext().ensureActive()
+        importBondedWatchesLocked(candidates, beginCommit)
+    }
+
+    /** Internal deterministic seam for platform-independent import lifecycle tests. */
+    internal suspend fun importBondedWatches(
+        candidates: List<BondedWatchCandidate>?,
+        beginCommit: () -> Boolean,
+    ): BondedWatchImportOutcome = seedBondedMutex.withLock {
+        if (candidates == null) return@withLock BondedWatchImportOutcome.Unavailable
+        importBondedWatchesLocked(candidates, beginCommit)
+    }
+
+    private suspend fun importBondedWatchesLocked(
+        sourceCandidates: List<BondedWatchCandidate>,
+        beginCommit: () -> Boolean,
+    ): BondedWatchImportOutcome {
+        val candidates = mergeBondedWatchCandidates(sourceCandidates)
+        val persisted = try {
+            knownWatchDao.knownWatches()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(e) { "Could not read known watches for bonded import" }
+            return BondedWatchImportOutcome.PersistenceFailed
+        }
+        val knownAddresses = persisted.flatMapTo(hashSetOf()) { item ->
+            buildList {
+                add(item.transportIdentifier.uppercase())
+                item.btClassicMacAddress?.let { add(it.uppercase()) }
+            }
+        }
+        val knownIdentities = persisted.mapTo(hashSetOf()) {
+            bondedWatchIdentity(it.name, it.transportIdentifier)
+        }
+        allWatches.value.values
+            .filter { it.asPersisted != null || it.knownWatchProps != null || it.forget }
+            .forEach { watch ->
+                knownAddresses += watch.identifier.asString.uppercase()
+                watch.asPersisted?.btClassicMacAddress?.let { knownAddresses += it.uppercase() }
+                knownIdentities += bondedWatchIdentity(watch.name, watch.identifier.asString)
+            }
+
+        var existing = 0
+        var unsupported = 0
+        val pending = mutableListOf<KnownWatchItem>()
+        candidates.forEach { candidate ->
+            if (
+                candidate.identity in knownIdentities ||
+                candidate.addresses.values.any { it.uppercase() in knownAddresses }
+            ) {
+                existing++
+                return@forEach
+            }
+            val selected = if (blePlatformConfig.supportsBtClassic) {
+                candidate.addresses[TransportType.BluetoothClassic]?.let {
+                    TransportType.BluetoothClassic to it
+                } ?: candidate.addresses[TransportType.BluetoothLe]?.let {
+                    TransportType.BluetoothLe to it
+                }
+            } else {
+                candidate.addresses[TransportType.BluetoothLe]?.let {
+                    TransportType.BluetoothLe to it
+                }
+            }
+            if (selected == null) {
+                unsupported++
+                return@forEach
+            }
+            val (transport, rawAddress) = selected
+            val address = rawAddress.uppercase()
+            pending += KnownWatchItem(
+                transportIdentifier = address,
+                transportType = transport,
+                name = candidate.name,
+                runningFwVersion = UNKNOWN_WATCH_SERIAL_OR_VERSION,
+                serial = UNKNOWN_WATCH_SERIAL_OR_VERSION,
+                connectGoal = false,
+            )
+            knownAddresses += address
+            knownIdentities += candidate.identity
+        }
+
+        currentCoroutineContext().ensureActive()
+        if (pending.isEmpty()) {
+            return BondedWatchImportOutcome.Completed(
+                imported = 0,
+                existing = existing,
+                aliases = candidates.importAliasCount(),
+                unsupported = unsupported,
+            )
+        }
+        if (!beginCommit()) return BondedWatchImportOutcome.Cancelled
+
+        return withContext(NonCancellable) {
+            val insertResults = try {
+                knownWatchDao.insertIfMissing(pending)
+            } catch (e: Exception) {
+                logger.w(e) { "Could not save bonded watches" }
+                return@withContext BondedWatchImportOutcome.PersistenceFailed
+            }
+            if (insertResults.size != pending.size) {
+                logger.w {
+                    "KnownWatchDao returned ${insertResults.size} results for ${pending.size} inserts"
+                }
+                return@withContext BondedWatchImportOutcome.PersistenceFailed
+            }
+            val inserted = pending.filterIndexed { index, _ -> insertResults[index] != -1L }
+            addImportedWatches(inserted)
+            BondedWatchImportOutcome.Completed(
+                imported = inserted.size,
+                existing = existing + pending.size - inserted.size,
+                aliases = candidates.importAliasCount(),
+                unsupported = unsupported,
+            )
+        }
+    }
+
+    private fun List<BondedWatchCandidate>.importAliasCount(): Int =
+        fold(0L) { count, candidate -> count + candidate.aliases.coerceAtLeast(0) }
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+
+    private fun addImportedWatches(inserted: List<KnownWatchItem>) {
+        if (inserted.isEmpty()) return
+        allWatches.update { current ->
+            inserted.fold(current) { watches, item ->
+                val id = item.identifier()
+                val existing = watches[id]
+                val imported = when {
+                    existing == null -> Watch(
+                        identifier = id,
+                        name = item.name,
+                        nickname = item.nickname,
+                        scanResult = null,
+                        connectGoal = item.connectGoal,
+                        knownWatchProps = item.asProps(),
+                        activeConnection = null,
+                        asPersisted = item,
+                        forget = false,
+                        firmwareUpdateAvailable = FirmwareUpdateCheckState(
+                            checkingForUpdates = false,
+                            result = null,
+                        ),
+                        lastFirmwareUpdateState = FirmwareUpdateStatus.NotInProgress.Idle(),
+                        connectionFailureInfo = null,
+                    )
+                    existing.asPersisted == null &&
+                        existing.knownWatchProps == null &&
+                        !existing.forget -> existing.copy(
+                            name = item.name,
+                            nickname = item.nickname,
+                            connectGoal = item.connectGoal,
+                            knownWatchProps = item.asProps(),
+                            asPersisted = item,
+                        )
+                    else -> return@fold watches
+                }
+                watches + (id to imported)
+            }
+        }
+    }
+
     fun seedBondedWatchesIfNeeded() {
         if (settings.getBoolean(SEEDED_BONDED_KEY, false)) return
         libPebbleCoroutineScope.launch {
-            seedBondedMutex.withLock {
+            val shouldWaitForBluetooth = seedBondedMutex.withLock {
                 // Re-check inside the lock — another caller may have finished while we waited.
-                if (settings.getBoolean(SEEDED_BONDED_KEY, false)) return@withLock
+                if (settings.getBoolean(SEEDED_BONDED_KEY, false)) return@withLock false
                 // Only seed if there are no known watches yet — approximates "fresh install".
                 // If the user already has watches this isn't a reinstall scenario, so just flip
                 // the flag and never try again.
-                if (allWatches.value.isNotEmpty()) {
-                    logger.d { "Skipping bonded watch seed: ${allWatches.value.size} watches already known" }
+                val knownWatchCount = knownWatchCountForBondSeed()
+                if (knownWatchCount != 0) {
+                    logger.d { "Skipping bonded watch seed: $knownWatchCount watches already known" }
+                    settings.putBoolean(SEEDED_BONDED_KEY, true)
+                    false
+                } else {
+                    true
+                }
+            }
+            if (!shouldWaitForBluetooth) return@launch
+
+            // Do not hold the import mutex while Bluetooth is disabled. Explicit user-requested
+            // import must still be able to enumerate (or return Unavailable) in that state.
+            bluetoothStateProvider.state.first { it == BluetoothState.Enabled }
+            seedBondedMutex.withLock {
+                // Manual import may have completed while automatic seeding waited for Bluetooth.
+                if (settings.getBoolean(SEEDED_BONDED_KEY, false)) return@withLock
+                val knownWatchCount = knownWatchCountForBondSeed()
+                if (knownWatchCount != 0) {
+                    logger.d { "Skipping bonded watch seed: $knownWatchCount watches already known" }
                     settings.putBoolean(SEEDED_BONDED_KEY, true)
                     return@withLock
                 }
-                // getBondedDevices returns empty when BT is off; wait until enabled.
-                bluetoothStateProvider.state.first { it == BluetoothState.Enabled }
-                val inserted = try {
-                    seedBondedWatches(appContext, knownWatchDao)
+                val candidates = try {
+                    bondedWatchCandidates(appContext)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    logger.e(e) { "Bonded watch seed failed; giving up" }
-                    settings.putBoolean(SEEDED_BONDED_KEY, true)
+                    logger.e(e) { "Bonded watch seed failed; will retry next launch" }
                     return@withLock
                 }
-                if (inserted == null) {
-                    logger.d { "Bonded watch seed skipped (will retry next launch)" }
-                    return@withLock
-                }
-                settings.putBoolean(SEEDED_BONDED_KEY, true)
-                if (inserted.isEmpty()) {
-                    logger.d { "Bonded watch seed ran; no new watches" }
-                    return@withLock
-                }
-                logger.i { "Seeded ${inserted.size} bonded watches" }
-                allWatches.update { current ->
-                    current + inserted
-                        .filterNot { current.containsKey(it.identifier()) }
-                        .associate { item ->
-                            val id = item.identifier()
-                            id to Watch(
-                                identifier = id,
-                                name = item.name,
-                                nickname = item.nickname,
-                                scanResult = null,
-                                connectGoal = item.connectGoal,
-                                knownWatchProps = item.asProps(),
-                                activeConnection = null,
-                                asPersisted = item,
-                                forget = false,
-                                firmwareUpdateAvailable = FirmwareUpdateCheckState(
-                                    checkingForUpdates = false,
-                                    result = null,
-                                ),
-                                lastFirmwareUpdateState = FirmwareUpdateStatus.NotInProgress.Idle(),
-                                connectionFailureInfo = null,
-                            )
-                        }
+                when (val outcome = seedBondedWatchesLocked(candidates)) {
+                    is BondedWatchImportOutcome.Completed -> {
+                        settings.putBoolean(SEEDED_BONDED_KEY, true)
+                        logger.i { "Seeded ${outcome.imported} bonded watches" }
+                    }
+                    BondedWatchImportOutcome.Unavailable ->
+                        logger.d { "Bonded watch seed unavailable; will retry next launch" }
+                    BondedWatchImportOutcome.PersistenceFailed ->
+                        logger.w { "Bonded watch seed could not be persisted; will retry next launch" }
+                    BondedWatchImportOutcome.Cancelled -> Unit
                 }
             }
         }
+    }
+
+    private fun knownWatchCountForBondSeed(): Int = allWatches.value.values.count {
+        it.asPersisted != null || it.knownWatchProps != null || it.forget
+    }
+
+    internal suspend fun seedBondedWatchesIfNeeded(
+        candidates: List<BondedWatchCandidate>?,
+    ): BondedWatchImportOutcome = seedBondedMutex.withLock {
+        seedBondedWatchesLocked(candidates)
+    }
+
+    private suspend fun seedBondedWatchesLocked(
+        candidates: List<BondedWatchCandidate>?,
+    ): BondedWatchImportOutcome {
+        if (candidates == null) return BondedWatchImportOutcome.Unavailable
+        return importBondedWatchesLocked(candidates) { true }
     }
 
     private suspend fun persistIfNeeded(
@@ -353,7 +554,13 @@ class WatchManager(
                 // State can be null for the first scan emission
                 val (watches, active, previousActive, btState) = state
                 if (watchConfig.value.verboseWatchManagerLogging) {
-                    logger.d { "combine: watches=$watches / active=$active / btstate=$btState / activeConnections=$activeConnections" }
+                    val activeConnectionSnapshot = synchronized(connectionGoalLock) {
+                        activeConnections.toSet()
+                    }
+                    logger.d {
+                        "combine: watches=$watches / active=$active / btstate=$btState / " +
+                            "activeConnections=$activeConnectionSnapshot"
+                    }
                 }
                 // Update for active connection state
                 watches.values.mapNotNull { device ->
@@ -363,7 +570,9 @@ class WatchManager(
                         currentState = active[identifier],
                     )
                     val hasConnectionAttempt =
-                        active.containsKey(device.identifier) || activeConnections.contains(device.identifier)
+                        active.containsKey(device.identifier) || synchronized(connectionGoalLock) {
+                            activeConnections.contains(device.identifier)
+                        }
 
                     persistIfNeeded(device)
                     // Removed forgotten device once it is disconnected
@@ -380,7 +589,11 @@ class WatchManager(
                         if (watchConfig.value.multipleConnectedWatchesSupported) {
                             connectTo(device)
                         } else {
-                            if (active.isEmpty() && activeConnections.isEmpty()) {
+                            if (
+                                active.isEmpty() && synchronized(connectionGoalLock) {
+                                    activeConnections.isEmpty()
+                                }
+                            ) {
                                 connectTo(device)
                             }
                         }
@@ -509,6 +722,13 @@ class WatchManager(
 
     override fun requestConnection(identifier: PebbleIdentifier) {
         libPebbleCoroutineScope.launch {
+            requestConnectionImmediately(identifier)
+        }
+    }
+
+    /** Applies the connection goal before returning so an ordered caller can retire it safely. */
+    internal fun requestConnectionImmediately(identifier: PebbleIdentifier) {
+        synchronized(connectionGoalLock) {
             logger.d("requestConnection: $identifier")
             val scanning = scanning.get()
             scanning.stopBleScan()
@@ -530,24 +750,63 @@ class WatchManager(
     }
 
     override fun requestDisconnection(identifier: PebbleIdentifier) {
-        logger.d("requestDisconnection: $identifier")
-        updateWatch(identifier = identifier) { it.copy(connectGoal = false) }
+        requestDisconnectionImmediately(identifier)
     }
 
-    private fun connectTo(device: Watch) {
-        val identifier = device.identifier
+    /** Clears the connection goal synchronously relative to an immediate request above. */
+    internal fun requestDisconnectionImmediately(identifier: PebbleIdentifier) {
+        synchronized(connectionGoalLock) {
+            logger.d("requestDisconnection: $identifier")
+            updateWatch(identifier = identifier) { it.copy(connectGoal = false) }
+        }
+    }
+
+    /** Wait until an immediately retired goal can no longer produce or retain a connection. */
+    internal suspend fun awaitConnectionRetired(identifier: PebbleIdentifier) {
+        allWatches.first {
+            synchronized(connectionGoalLock) {
+                val current = allWatches.value[identifier]
+                current?.connectGoal != true &&
+                    current?.activeConnection == null &&
+                    identifier !in activeConnections
+            }
+        }
+    }
+
+    private fun connectTo(snapshot: Watch) = synchronized(connectionGoalLock) {
+        val identifier = snapshot.identifier
+        val device = allWatches.value[identifier]
+        if (device == null || !device.connectGoal) {
+            logger.d("ignoring retired connection goal for $identifier")
+            return@synchronized
+        }
         logger.d("connectTo: $identifier (activeConnections=$activeConnections)")
         if (device.activeConnection != null) {
             logger.w("Already connecting to $identifier")
-            return
+            return@synchronized
         }
-        updateWatch(identifier = identifier) { watch ->
-            val connectionExists = activeConnections.contains(identifier)
-            if (connectionExists) {
-                logger.e("Already connecting to $identifier (this is a bug)")
-                return@updateWatch null
+        val platformIdentifier = createPlatformIdentifier.identifier(identifier, device.name, device.connectionFailureInfo != null)
+        if (platformIdentifier == null) {
+            // Probably because it couldn't create the device (ios throws on an unknown persisted
+            // uuid, so we'll need to scan for it using the name/serial?)...
+            // ...but TODO revisit this once we have more error modes + handle BT being disabled.
+            if (device.knownWatchProps != null) {
+                logger.w("removing known device: $identifier")
+                updateWatch(identifier) { it.copy(connectGoal = false, forget = true) }
             }
+            // Hack: force another connection-state pass.
+            updateWatch(identifier) { it.copy() }
+            return@synchronized
+        }
 
+        if (!activeConnections.add(identifier)) {
+            logger.e("Already connecting to $identifier (this is a bug)")
+            return@synchronized
+        }
+
+        var connectionKoinScope: ConnectionScope? = null
+        var connectionAttached = false
+        try {
             var caughtException = false
             val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
                 logger.e(
@@ -568,51 +827,39 @@ class WatchManager(
                     }
                 }
             }
-            val platformIdentifier = createPlatformIdentifier.identifier(
-                identifier = identifier,
-                name = watch.name,
-                lastAttemptFailed = device.connectionFailureInfo != null,
-            )
-            if (platformIdentifier == null) {
-                // Probably because it couldn't create the device (ios throws on an unknown peristed
-                // uuid, so we'll need to scan for it using the name/serial?)...
-                // ...but TODO revit this once have more error modes + are handling BT being disabled
-                if (device.knownWatchProps != null) {
-                    logger.w("removing known device: $identifier")
-                    forget(identifier)
-                }
-                // hack force another connection
-                updateWatch(identifier = identifier) { watch ->
-                    watch.copy()
-                }
-                return@updateWatch null
-            }
-
-            activeConnections.add(identifier)
             val deviceIdString = identifier.asString
             val thisConnectionNum = connectionNum++
             val coroutineContext =
                 SupervisorJob() + exceptionHandler + CoroutineName("con-$deviceIdString-$thisConnectionNum")
             val connectionScope = ConnectionCoroutineScope(coroutineContext)
-            logger.v("transport.createConnector: $platformIdentifier")
-            val color = watch.color()
-            val connectionKoinScope = connectionScopeFactory.createScope(
+            logger.v("transport.createConnector")
+            val newConnectionKoinScope = connectionScopeFactory.createScope(
                 ConnectionScopeProperties(
                     identifier,
                     connectionScope,
                     platformIdentifier,
-                    color,
-                )
+                    device.color(),
+                ),
             )
-            val pebbleConnector: PebbleConnector = connectionKoinScope.pebbleConnector
+            connectionKoinScope = newConnectionKoinScope
+            if (!attachConnection(identifier, newConnectionKoinScope)) {
+                rollbackConnectionSetup(
+                    identifier = identifier,
+                    connection = newConnectionKoinScope,
+                    attached = false,
+                )
+                return@synchronized
+            }
+            connectionAttached = true
+            val pebbleConnector = newConnectionKoinScope.pebbleConnector
 
             // This is here for scenarios where we have suspended code waiting for something to
             // happen (e.g. bonding for 60 seconds), which otherwise would wait the entire 60
-            // 60 seconds to finish, even after a disconnection.
+            // seconds to finish, even after a disconnection.
             val disconnectDuringConnectionJob = connectionScope.launch {
                 pebbleConnector.disconnected.disconnected.await()
                 logger.d("got disconnection (before connection)")
-                connectionKoinScope.cleanup()
+                newConnectionKoinScope.cleanup()
             }
 
             connectionScope.launch {
@@ -628,22 +875,77 @@ class WatchManager(
                     disconnectDuringConnectionJob.cancel()
                     logger.d("watchmanager connected (or failed..); waiting for disconnect: $identifier")
                     pebbleConnector.disconnected.disconnected.await()
-                    // TODO if not know (i.e. if only a scanresult), then don't reconnect (set goal = false)
+                    // TODO if not known (i.e. if only a scan result), then don't reconnect.
                     logger.d("watchmanager got disconnection: $identifier")
                     val connectionFailureReason = (pebbleConnector.state.value as? ConnectingPebbleState.Failed)?.reason
                     device.updateFailureReason(connectionFailureReason)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // Because we call cleanup() in the `finally` block, the CoroutineExceptionHandler is not called.
-                    // So catch it here just to log it.
+                    // Because cleanup() runs in finally, the exception handler is not called.
                     logger.e(e) { "connect crashed" }
                     throw e
                 } finally {
-                    connectionKoinScope.cleanup()
+                    newConnectionKoinScope.cleanup()
                 }
             }
-            watch.copy(activeConnection = connectionKoinScope)
+        } catch (e: CancellationException) {
+            rollbackConnectionSetup(identifier, connectionKoinScope, connectionAttached)
+            throw e
+        } catch (e: Exception) {
+            rollbackConnectionSetup(identifier, connectionKoinScope, connectionAttached)
+            logger.e(e) { "Could not create connection for $identifier" }
+            val reason = (e as? ConnectionException)?.reason
+                ?: ConnectionFailureReason.FailedToConnect
+            updateWatch(identifier) { watch ->
+                val previous = watch.connectionFailureInfo
+                watch.copy(
+                    connectGoal = false,
+                    connectionFailureInfo = ConnectionFailureInfo(
+                        reason = reason,
+                        times = if (previous?.reason == reason) previous.times + 1 else 1,
+                    ),
+                )
+            }
+        }
+    }
+
+    /** Atomically publishes the already-created connection without side effects in a CAS lambda. */
+    private fun attachConnection(identifier: PebbleIdentifier, connection: ConnectionScope): Boolean {
+        while (true) {
+            val watches = allWatches.value
+            val watch = watches[identifier] ?: return false
+            if (!watch.connectGoal || watch.activeConnection != null) return false
+            val updated = watches + (identifier to watch.copy(activeConnection = connection))
+            if (allWatches.compareAndSet(watches, updated)) return true
+        }
+    }
+
+    private fun detachConnection(identifier: PebbleIdentifier, connection: ConnectionScope) {
+        while (true) {
+            val watches = allWatches.value
+            val watch = watches[identifier] ?: return
+            if (watch.activeConnection !== connection) return
+            val updated = watches + (identifier to watch.copy(activeConnection = null))
+            if (allWatches.compareAndSet(watches, updated)) return
+        }
+    }
+
+    private fun rollbackConnectionSetup(
+        identifier: PebbleIdentifier,
+        connection: ConnectionScope?,
+        attached: Boolean,
+    ) {
+        try {
+            if (attached && connection != null) detachConnection(identifier, connection)
+        } finally {
+            try {
+                connection?.close()
+            } catch (e: Exception) {
+                logger.w(e) { "Could not close failed connection scope for $identifier" }
+            } finally {
+                activeConnections.remove(identifier)
+            }
         }
     }
 
@@ -674,28 +976,50 @@ class WatchManager(
                 return@async
             }
             logger.d("$identifier: cleanup")
-            pebbleConnector.disconnect()
             try {
-                // TODO can this break when BT gets disabled? we call this, it times out, ...
-                withTimeout(DISCONNECT_TIMEOUT) {
-                    logger.d("$identifier: cleanup: waiting for disconnection")
-                    pebbleConnector.disconnected.disconnected.await()
+                var disconnectRequested = false
+                try {
+                    pebbleConnector.disconnect()
+                    disconnectRequested = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logger.w(e) { "$identifier: cleanup: disconnect request failed" }
                 }
-            } catch (e: TimeoutCancellationException) {
-                logger.w("cleanup: timed out waiting for disconnection from $identifier")
+                if (disconnectRequested) {
+                    try {
+                        withTimeout(DISCONNECT_TIMEOUT) {
+                            logger.d("$identifier: cleanup: waiting for disconnection")
+                            pebbleConnector.disconnected.disconnected.await()
+                        }
+                    } catch (e: TimeoutCancellationException) {
+                        logger.w("cleanup: timed out waiting for disconnection from $identifier")
+                    }
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    try {
+                        logger.d("$identifier: cleanup: cancelling scope")
+                        try {
+                            close()
+                        } catch (e: Exception) {
+                            logger.w(e) { "$identifier: cleanup: scope close failed" }
+                        }
+                        // This is essentially a hack to work around the case where we
+                        // disconnect+reconnect so fast that the watch doesn't realize.
+                        if (blePlatformConfig.delayBleDisconnections) {
+                            logger.d { "delaying before marking as disconnected.." }
+                            delay(APP_START_WAIT_TO_CONNECT)
+                        }
+                    } finally {
+                        logger.d("$identifier: cleanup: removing active device")
+                        synchronized(connectionGoalLock) {
+                            activeConnections.remove(identifier)
+                            detachConnection(identifier, this@cleanup)
+                        }
+                    }
+                }
             }
-            logger.d("$identifier: cleanup: removing active device")
-            logger.d("$identifier: cleanup: cancelling scope")
-            close()
-            // This is essentially a hack to work around the case where we disconnect+reconnect so
-            // fast that the watch doesn't realize. Wait a little bit before trying to connect
-            // again
-            if (blePlatformConfig.delayBleDisconnections) {
-                logger.d { "delaying before marking as disconnected.." }
-                delay(APP_START_WAIT_TO_CONNECT)
-            }
-            activeConnections.remove(identifier)
-            updateWatch(identifier) { it.copy(activeConnection = null) }
         }.await()
     }
 
@@ -706,7 +1030,14 @@ class WatchManager(
             Logger.d("disconnectFrom / not an active device")
             return
         }
-        activeConnection.pebbleConnector.disconnect()
+        try {
+            activeConnection.pebbleConnector.disconnect()
+        } catch (e: Exception) {
+            logger.w(e) { "disconnectFrom: disconnect request failed for $identifier" }
+            libPebbleCoroutineScope.launch {
+                activeConnection.cleanup()
+            }
+        }
     }
 
     private fun Watch.isOnlyScanResult() =

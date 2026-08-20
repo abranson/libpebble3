@@ -6,8 +6,8 @@ import io.rebble.libpebblecommon.connection.AppContext
 import io.rebble.libpebblecommon.util.JvmPaths
 
 internal actual fun getDatabaseBuilder(ctx: AppContext): RoomDatabase.Builder<Database> {
-    // XDG data dir, not tmpdir: the db holds known watches + connect goals and must survive
-    // reboots (Sailfish clears /tmp) for the daemon to auto-reconnect.
+    // XDG data dir, not tmpdir: the database holds known watches and connect
+    // goals and must survive reboots for automatic reconnection.
     val dbFile = JvmPaths.dataSubdir("db").resolve(DATABASE_FILENAME)
     return Room.databaseBuilder<Database>(
         name = dbFile.toAbsolutePath().toString(),

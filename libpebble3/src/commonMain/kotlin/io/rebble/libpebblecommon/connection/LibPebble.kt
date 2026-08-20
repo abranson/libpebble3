@@ -42,6 +42,7 @@ import io.rebble.libpebblecommon.di.initKoin
 import io.rebble.libpebblecommon.health.Health
 import io.rebble.libpebblecommon.health.HealthDebugStats
 import io.rebble.libpebblecommon.health.HealthSettings
+import io.rebble.libpebblecommon.health.HealthSettingsInitialization
 import io.rebble.libpebblecommon.js.InjectedPKJSHttpInterceptors
 import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.locker.AppBasicProperties
@@ -266,8 +267,38 @@ interface Watches {
 }
 
 interface WebServices {
+    /** Whether locker and timeline credentials are meaningful only while an account is active. */
+    fun usesAccountSessions(): Boolean = false
+
+    /**
+     * Opaque identity for the account used by scoped locker requests. Implementations which do
+     * not have account-scoped web services may keep returning null.
+     */
+    fun currentAccountSession(): WebAccountSession? = null
+
+    /** Return whether [session] still identifies the implementation's current account. */
+    fun isCurrentAccountSession(session: WebAccountSession): Boolean = false
+
+    /**
+     * Retire previously captured account sessions before local account data is cleared. The
+     * default keeps implementations without mutable account credentials source compatible.
+     */
+    fun invalidateAccountSessions() {}
+
     suspend fun fetchLocker(): LockerModelWrapper?
+
+    /**
+     * Fetch using the exact account captured in [session]. The default preserves existing
+     * implementations which never expose a session; account-backed implementations must provide
+     * a scoped request and avoid re-reading mutable auth state for its credentials.
+     */
+    suspend fun fetchLocker(session: WebAccountSession): LockerModelWrapper? = null
+
     suspend fun removeFromLocker(id: Uuid): Boolean
+
+    /** Remove from the exact account captured in [session]. */
+    suspend fun removeFromLocker(id: Uuid, session: WebAccountSession): Boolean = false
+
     suspend fun checkForFirmwareUpdate(watch: WatchInfo, force: Boolean): FirmwareUpdateCheckResult
     fun uploadMemfaultChunk(chunk: ByteArray, watchInfo: WatchInfo)
     fun uploadAnalyticsHeartbeat(payload: ByteArray, watchInfo: WatchInfo)
@@ -278,7 +309,16 @@ interface WebServices {
      * a Rebble-backed implementation queries the sandbox-token endpoint.
      */
     suspend fun getSandboxTimelineToken(uuid: Uuid): String? = null
+
+    /** Fetch a sandbox token using the exact account captured in [session]. */
+    suspend fun getSandboxTimelineToken(uuid: Uuid, session: WebAccountSession): String? = null
 }
+
+/**
+ * Opaque account-web-service session. Implementations retain any credentials privately and must
+ * not expose them from [Any.toString] or diagnostics.
+ */
+interface WebAccountSession
 
 interface TokenProvider {
     suspend fun getDevToken(): String?
@@ -348,10 +388,29 @@ interface LockerApi {
     fun getLocker(type: AppType, searchQuery: String?, limit: Int): Flow<List<LockerWrapper>>
     fun getLockerApp(id: Uuid): Flow<LockerWrapper?>
     suspend fun setAppOrder(id: Uuid, order: Int)
+    suspend fun setAppOrder(orderedIds: List<Uuid>): Boolean
     suspend fun waitUntilAppSyncedToWatch(id: Uuid, identifier: PebbleIdentifier, timeout: Duration): Boolean
     suspend fun removeApp(id: Uuid): Boolean
     suspend fun addAppToLocker(app: LockerEntry)
     suspend fun addAppsToLocker(apps: List<LockerEntry>)
+
+    /** Add only if [session] still owns the account-backed locker. */
+    suspend fun addAppToLocker(app: LockerEntry, session: WebAccountSession): Boolean = false
+
+    /** Add only if [session] still owns the account-backed locker. */
+    suspend fun addAppsToLocker(
+        apps: List<LockerEntry>,
+        session: WebAccountSession,
+    ): Boolean = false
+
+    /**
+     * Retire cloud-owned locker state before atomically publishing replacement account
+     * credentials through [commitCredentials]. System and sideloaded applications are retained.
+     *
+     * The default keeps non-account-aware implementations source compatible.
+     */
+    suspend fun transitionAccount(commitCredentials: () -> Boolean): Boolean = commitCredentials()
+
     fun restoreSystemAppOrder()
     val activeWatchface: StateFlow<LockerWrapper?>
 }
@@ -366,6 +425,14 @@ interface Contacts {
 @Stable
 interface NotificationApps {
     fun notificationApps(): Flow<List<AppWithCount>>
+
+    /**
+     * Tombstones the source identified by [packageName]. A later normal notification-source
+     * registration may insert it again with freshly derived defaults.
+     *
+     * [packageName] must not be blank.
+     */
+    suspend fun forgetNotificationApp(packageName: String)
     fun notificationAppChannelCounts(packageName: String): Flow<List<ChannelAndCount>>
     fun mostRecentNotificationsFor(pkg: String?, channelId: String?, contactId: String?, limit: Int): Flow<List<NotificationEntity>>
     fun mostRecentNotificationParticipants(limit: Int): Flow<List<String>>
@@ -458,6 +525,56 @@ class LibPebble3(
     HealthDataApi by health, Plugins by pluginRegistry {
     private val logger = Logger.withTag("LibPebble3")
     private val initialized = AtomicBoolean(false)
+
+    /** Whether config initialization loaded a pre-existing persisted value. */
+    val configLoadedFromStorage: Boolean = libPebbleConfigFlow.configLoadedFromStorage
+
+    /** Whether this settings store was originally initialized from generated defaults. */
+    val configGeneratedFromDefault: Boolean = libPebbleConfigFlow.configGeneratedFromDefault
+
+    /** Exact character length of the config value written by this concrete runtime. */
+    fun serializedConfigLength(config: LibPebbleConfig): Int =
+        libPebbleConfigFlow.serializedLength(config)
+
+    /** Explicit OS-bond import for concrete runtimes such as the Linux daemon. */
+    suspend fun importBondedWatches(
+        beginCommit: () -> Boolean,
+    ): BondedWatchImportOutcome = watchManager.importBondedWatches(beginCommit)
+
+    /** Ordered daemon seam: publish this connection goal before returning. */
+    fun requestConnectionImmediately(identifier: PebbleIdentifier) {
+        watchManager.requestConnectionImmediately(identifier)
+    }
+
+    /** Ordered daemon seam: retire a previously published connection goal before returning. */
+    fun cancelConnectionImmediately(identifier: PebbleIdentifier) {
+        watchManager.requestDisconnectionImmediately(identifier)
+    }
+
+    /** Wait until an ordered cancellation has retired both its goal and transport attempt. */
+    suspend fun awaitConnectionRetired(identifier: PebbleIdentifier) {
+        watchManager.awaitConnectionRetired(identifier)
+    }
+
+    /** Atomically install a complete health-settings record only for a fresh database. */
+    suspend fun initializeHealthSettingsIfAbsent(
+        transform: (HealthSettings) -> HealthSettings,
+    ): HealthSettingsInitialization? = health.initializeHealthSettingsIfAbsent(transform)
+
+    /** Durably replace the complete health-settings record in one transaction. */
+    suspend fun persistHealthSettings(healthSettings: HealthSettings) {
+        health.persistHealthSettings(healthSettings)
+    }
+
+    /** Durably update one learned notification application's mute state before returning. */
+    suspend fun persistNotificationAppMuteState(packageName: String, muteState: MuteState) {
+        notificationApi.persistNotificationAppMuteState(packageName, muteState)
+    }
+
+    /** Atomically reconcile all learned application mute states with canonical daemon policy. */
+    suspend fun reconcileNotificationAppMuteStates(muteStates: Map<String, MuteState>) {
+        notificationApi.reconcileNotificationAppMuteStates(muteStates)
+    }
 
     override fun init() {
         if (!initialized.compareAndSet(expectedValue = false, newValue = true)) {

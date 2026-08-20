@@ -145,6 +145,250 @@ fun HealthSettingsEntryDao.getWatchSettings(): Flow<HealthSettings> {
     }
 }
 
+/** Value defaults used when no health-settings row has ever been persisted. */
+internal fun defaultHealthSettings(): HealthSettings {
+    val activity = ActivityPrefsValue()
+    val units = UnitsDistanceValue()
+    val hrm = HrmPreferencesValue()
+    val heartRate = HeartRatePreferencesValue()
+    return HealthSettings(
+        heightMm = activity.heightMm,
+        weightDag = activity.weightDag,
+        trackingEnabled = activity.trackingEnabled,
+        activityInsightsEnabled = activity.activityInsightsEnabled,
+        sleepInsightsEnabled = activity.sleepInsightsEnabled,
+        ageYears = activity.ageYears,
+        gender = activity.gender,
+        imperialUnits = units.imperialUnits,
+        hrmEnabled = hrm.enabled,
+        hrmMeasurementInterval = hrm.measurementInterval,
+        hrmActivityTrackingEnabled = hrm.activityTrackingEnabled,
+        restingHr = heartRate.restingHr,
+        elevatedHr = heartRate.elevatedHr,
+        maxHr = heartRate.maxHr,
+        hrZone1Threshold = heartRate.zone1Threshold,
+        hrZone2Threshold = heartRate.zone2Threshold,
+        hrZone3Threshold = heartRate.zone3Threshold,
+    )
+}
+
+suspend fun HealthSettingsEntryDao.setWatchSettings(healthSettings: HealthSettings) {
+    val now = Clock.System.now().asMillisecond()
+    insertOrReplace(
+        HealthSettingsEntry(
+            id = KEY_ACTIVITY_PREFERENCES,
+            value = ActivityPrefsValue(
+                heightMm = healthSettings.heightMm,
+                weightDag = healthSettings.weightDag,
+                trackingEnabled = healthSettings.trackingEnabled,
+                activityInsightsEnabled = healthSettings.activityInsightsEnabled,
+                sleepInsightsEnabled = healthSettings.sleepInsightsEnabled,
+                ageYears = healthSettings.ageYears,
+                gender = healthSettings.gender,
+            ).encodeToString(),
+            timestamp = now,
+        )
+    )
+    insertOrReplace(
+        HealthSettingsEntry(
+            id = KEY_UNITS_DISTANCE,
+            value = UnitsDistanceValue(
+                imperialUnits = healthSettings.imperialUnits,
+            ).encodeToString(),
+            timestamp = now,
+        )
+    )
+    insertOrReplace(
+        HealthSettingsEntry(
+            id = KEY_HRM_PREFERENCES,
+            value = HrmPreferencesValue(
+                enabled = healthSettings.hrmEnabled,
+                measurementInterval = healthSettings.hrmMeasurementInterval,
+                activityTrackingEnabled = healthSettings.hrmActivityTrackingEnabled,
+            ).encodeToString(),
+            timestamp = now,
+        )
+    )
+    insertOrReplace(
+        HealthSettingsEntry(
+            id = KEY_HEART_RATE_PREFERENCES,
+            value = HeartRatePreferencesValue(
+                restingHr = healthSettings.restingHr,
+                elevatedHr = healthSettings.elevatedHr,
+                maxHr = healthSettings.maxHr,
+                zone1Threshold = healthSettings.hrZone1Threshold,
+                zone2Threshold = healthSettings.hrZone2Threshold,
+                zone3Threshold = healthSettings.hrZone3Threshold,
+            ).encodeToString(),
+            timestamp = now,
+        )
+    )
+}
+
+@Serializable
+data class ActivityPrefsValue(
+    val heightMm: Short = 1700, // 170cm in mm (default height)
+    val weightDag: Short = 7000, // 70kg in decagrams (default weight)
+    val trackingEnabled: Boolean = false,
+    val activityInsightsEnabled: Boolean = false,
+    val sleepInsightsEnabled: Boolean = false,
+    val ageYears: Int = 35,
+    val gender: HealthGender = HealthGender.Female,
+) {
+    companion object {
+        fun ActivityPrefsValue.encodeToString(): String = json.encodeToString(this)
+        fun fromString(value: String?): ActivityPrefsValue? = value?.let { json.decodeFromString(value) }
+        fun ActivityPrefsValue.asBytes(): UByteArray = ActivityPrefsBlobItem(
+            heightMm = heightMm.toUShort(),
+            weightDag = weightDag.toUShort(),
+            trackingEnabled = trackingEnabled,
+            activityInsightsEnabled = activityInsightsEnabled,
+            sleepInsightsEnabled = sleepInsightsEnabled,
+            ageYears = ageYears.toByte(),
+            gender = gender.value,
+        ).toBytes()
+    }
+}
+
+@Serializable
+data class UnitsDistanceValue(
+    val imperialUnits: Boolean = false, // false = metric (km/kg), true = imperial (mi/lb)
+) {
+    companion object {
+        fun UnitsDistanceValue.encodeToString(): String = json.encodeToString(this)
+        fun fromString(value: String?): UnitsDistanceValue? = value?.let { json.decodeFromString(value) }
+        fun UnitsDistanceValue.asBytes(): UByteArray = DistanceUnitsBlobItem(
+            imperialUnits = imperialUnits,
+        ).toBytes()
+    }
+}
+
+@Serializable
+data class HrmPreferencesValue(
+    val enabled: Boolean = true,
+    val measurementInterval: HRMonitoringInterval = HRMonitoringInterval.TenMin,
+    val activityTrackingEnabled: Boolean = false,
+) {
+    companion object {
+        fun HrmPreferencesValue.encodeToString(): String = json.encodeToString(this)
+        fun fromString(value: String?): HrmPreferencesValue? = value?.let { json.decodeFromString(value) }
+
+        // ActivityHRMSettings grew over time and the watch rejects writes whose length doesn't
+        // match the compiled-in struct size. Cutoffs:
+        //   < v4.9.146 → 1 byte (just `enabled`) — legacy Pebble hardware that can't be updated
+        //   v4.9.146 to v4.9.149 → 2 bytes (added measurement_interval)
+        //   ≥ v4.9.150 → 3 bytes (added activity_tracking_enabled)
+        fun HrmPreferencesValue.asBytes(firmwareVersion: FirmwareVersion): UByteArray =
+            HrmPreferencesBlobItem(
+                enabled = enabled,
+                measurementInterval = measurementInterval.value,
+                hasMeasurementInterval = firmwareVersion >= FW_HRM_MEASUREMENT_INTERVAL,
+                activityTrackingEnabled = activityTrackingEnabled,
+                hasActivityTrackingEnabled = firmwareVersion >= FW_HRM_ACTIVITY_TRACKING,
+            ).toBytes()
+    }
+}
+
+@Serializable
+data class HeartRatePreferencesValue(
+    val restingHr: Short = 70,
+    val elevatedHr: Short = 100,
+    val maxHr: Short = 190, // 220 − default age (30)
+    val zone1Threshold: Short = 130, // 50% of HRR
+    val zone2Threshold: Short = 154, // 70% of HRR
+    val zone3Threshold: Short = 172, // 85% of HRR
+) {
+    companion object {
+        fun HeartRatePreferencesValue.encodeToString(): String = json.encodeToString(this)
+        fun fromString(value: String?): HeartRatePreferencesValue? = value?.let { json.decodeFromString(value) }
+        fun HeartRatePreferencesValue.asBytes(): UByteArray = HeartRatePreferencesBlobItem(
+            restingHr = restingHr.toUByte(),
+            elevatedHr = elevatedHr.toUByte(),
+            maxHr = maxHr.toUByte(),
+            zone1Threshold = zone1Threshold.toUByte(),
+            zone2Threshold = zone2Threshold.toUByte(),
+            zone3Threshold = zone3Threshold.toUByte(),
+        ).toBytes()
+    }
+}
+
+class ActivityPrefsBlobItem(
+    heightMm: UShort,
+    weightDag: UShort,
+    trackingEnabled: Boolean,
+    activityInsightsEnabled: Boolean,
+    sleepInsightsEnabled: Boolean,
+    ageYears: Byte,
+    gender: Byte,
+) : StructMappable(endianness = Endian.Little) {
+    val heightMm = SUShort(m, heightMm, endianness = Endian.Little)
+    val weightDag = SUShort(m, weightDag, endianness = Endian.Little)
+    val trackingEnabled = SByte(m, if (trackingEnabled) 0x01 else 0x00)
+    val activityInsightsEnabled = SByte(m, if (activityInsightsEnabled) 0x01 else 0x00)
+    val sleepInsightsEnabled = SByte(m, if (sleepInsightsEnabled) 0x01 else 0x00)
+    val ageYears = SByte(m, ageYears)
+    val gender = SByte(m, gender)
+}
+
+class DistanceUnitsBlobItem(
+    imperialUnits: Boolean,
+) : StructMappable(endianness = Endian.Little) {
+    val imperialUnits = SByte(m, if (imperialUnits) 0x01 else 0x00)
+}
+
+class HrmPreferencesBlobItem(
+    enabled: Boolean,
+    measurementInterval: Byte,
+    hasMeasurementInterval: Boolean,
+    activityTrackingEnabled: Boolean,
+    hasActivityTrackingEnabled: Boolean,
+) : StructMappable(endianness = Endian.Little) {
+    val enabled = SByte(m, if (enabled) 0x01 else 0x00)
+    val measurementInterval = SOptional(m, SByte(StructMapper(), measurementInterval), hasMeasurementInterval)
+    val activityTrackingEnabled = SOptional(m, SBoolean(StructMapper(), activityTrackingEnabled), hasActivityTrackingEnabled)
+}
+
+class HeartRatePreferencesBlobItem(
+    restingHr: UByte,
+    elevatedHr: UByte,
+    maxHr: UByte,
+    zone1Threshold: UByte,
+    zone2Threshold: UByte,
+    zone3Threshold: UByte,
+) : StructMappable(endianness = Endian.Little) {
+    val restingHr = SUByte(m, restingHr)
+    val elevatedHr = SUByte(m, elevatedHr)
+    val maxHr = SUByte(m, maxHr)
+    val zone1Threshold = SUByte(m, zone1Threshold)
+    val zone2Threshold = SUByte(m, zone2Threshold)
+    val zone3Threshold = SUByte(m, zone3Threshold)
+}
+
+enum class HealthGender(
+    val value: Byte,
+) {
+    Female(0),
+    Male(1),
+    Other(2),
+    ;
+
+    companion object {
+        fun fromInt(value: Byte) = entries.first { it.value == value }
+    }
+}
+
+enum class HRMonitoringInterval(val value: Byte) {
+    TenMin(0),
+    ThirtyMin(1),
+    OneHour(2),
+    Disabled(3),
+    ;
+
+    companion object {
+        fun fromInt(value: Byte) = entries.first { it.value == value }
+    }
+}
+
 /** Writes only the units entry, leaving the other health settings untouched. */
 suspend fun HealthSettingsEntryDao.setImperialUnits(imperialUnits: Boolean) {
     insertOrReplace(

@@ -7,10 +7,10 @@ import io.rebble.libpebblecommon.connection.HealthDataApi
 import io.rebble.libpebblecommon.connection.LatestHeartRate
 import io.rebble.libpebblecommon.connection.WatchManager
 import io.rebble.libpebblecommon.database.dao.HealthDao
+import io.rebble.libpebblecommon.database.dao.HealthSettingsEntryRealDao
 import io.rebble.libpebblecommon.database.entity.HealthDataEntity
 import io.rebble.libpebblecommon.database.entity.HRMonitoringInterval
 import io.rebble.libpebblecommon.database.entity.HealthGender
-import io.rebble.libpebblecommon.database.entity.HealthSettingsEntryDao
 import io.rebble.libpebblecommon.database.entity.HealthStatDao
 import io.rebble.libpebblecommon.database.entity.OverlayDataEntity
 import io.rebble.libpebblecommon.database.entity.getWatchSettings
@@ -42,7 +42,7 @@ import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Clock.System
 
 class Health(
-    private val healthSettingsDao: HealthSettingsEntryDao,
+    private val healthSettingsDao: HealthSettingsEntryRealDao,
     private val libPebbleCoroutineScope: LibPebbleCoroutineScope,
     private val healthDao: HealthDao,
     private val healthStatDao: HealthStatDao,
@@ -69,13 +69,27 @@ class Health(
     override fun updateHealthSettings(healthSettings: HealthSettings) {
         logger.d { "updateHealthSettings called: $healthSettings" }
         libPebbleCoroutineScope.launch {
-            healthSettingsDao.setWatchSettings(healthSettings)
+            persistHealthSettings(healthSettings)
             logger.d { "Health settings saved to database - will sync to watch via BlobDB" }
         }
     }
 
     override suspend fun updateImperialUnits(imperialUnits: Boolean) {
         healthSettingsDao.setImperialUnits(imperialUnits)
+    }
+
+    internal suspend fun persistHealthSettings(healthSettings: HealthSettings) {
+        healthSettingsDao.setWatchSettingsTransactionally(healthSettings)
+    }
+
+    internal suspend fun initializeHealthSettingsIfAbsent(
+        transform: (HealthSettings) -> HealthSettings,
+    ): HealthSettingsInitialization? {
+        val initialized = healthSettingsDao.initializeIfAbsent(transform) ?: return null
+        return HealthSettingsInitialization(
+            previous = io.rebble.libpebblecommon.database.entity.defaultHealthSettings(),
+            current = initialized,
+        )
     }
 
     override suspend fun getHealthDebugStats(): HealthDebugStats {
@@ -458,6 +472,12 @@ data class HealthSettings(
     val hrZone1Threshold: Short,
     val hrZone2Threshold: Short,
     val hrZone3Threshold: Short,
+)
+
+/** Result of atomically initializing a previously empty health-settings store. */
+data class HealthSettingsInitialization(
+    val previous: HealthSettings,
+    val current: HealthSettings,
 )
 
 /** Time range for displaying health data */

@@ -199,6 +199,8 @@ class FakeLibPebble : LibPebble {
 
     }
 
+    override suspend fun setAppOrder(orderedIds: List<Uuid>): Boolean = true
+
     override suspend fun waitUntilAppSyncedToWatch(
         id: Uuid,
         identifier: PebbleIdentifier,
@@ -222,6 +224,11 @@ class FakeLibPebble : LibPebble {
 
     override fun notificationApps(): Flow<List<AppWithCount>> =
         _notificationApps.map { it.map { AppWithCount(it, 44) } }
+
+    override suspend fun forgetNotificationApp(packageName: String) {
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        _notificationApps.value = _notificationApps.value.filterNot { it.packageName == packageName }
+    }
 
     override fun notificationAppChannelCounts(packageName: String): Flow<List<ChannelAndCount>> =
         MutableStateFlow(emptyList())
@@ -739,6 +746,14 @@ class FakeConnectedDevice(
     override val installedLanguagePack: InstalledLanguagePack? = null
 
     override suspend fun requestHealthData(fullSync: Boolean): Boolean = true
+
+    var timelineResetCount: Int = 0
+        private set
+
+    override suspend fun resetTimeline(): Boolean {
+        timelineResetCount += 1
+        return true
+    }
 }
 
 class FakeConnectedDeviceInRecovery(

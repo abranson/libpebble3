@@ -46,6 +46,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Instant.Companion.DISTANT_PAST
 
 enum class ConnectionFailureReason {
@@ -187,12 +189,9 @@ class RealPebbleConnector(
                 val negotiationJob = scope.async {
                     doAfterConnection(knownWatchProperties, result.reversePpogVersion)
                 }
-                val disconnectedJob = scope.launch {
-                    transportConnector.disconnected.await()
+                awaitNegotiationOrDisconnect(negotiationJob, transportConnector.disconnected) {
                     logger.w { "Disconnected during negotiation" }
-                    negotiationJob.cancel()
                 }
-                disconnectedJob.cancel()
             }
         }
     }
@@ -309,9 +308,29 @@ class RealPebbleConnector(
                 screenshot = screenshotService,
                 language = languagePackInstaller,
                 health = healthService,
+                timelineControl = blobDB,
             ),
             reversePpogVersion = reversePpogVersion,
         )
+    }
+}
+
+internal suspend fun awaitNegotiationOrDisconnect(
+    negotiation: Deferred<Unit>,
+    disconnected: Deferred<ConnectionFailureReason>,
+    onDisconnect: () -> Unit,
+) {
+    select {
+        // select is biased: if both are already complete, a dead transport wins over publishing
+        // a transient Connected state from the negotiation result.
+        disconnected.onAwait {
+            onDisconnect()
+            negotiation.cancel()
+            throw CancellationException("Disconnected during negotiation")
+        }
+        negotiation.onAwait {
+            Unit
+        }
     }
 }
 

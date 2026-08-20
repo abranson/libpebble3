@@ -15,6 +15,7 @@ import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -167,9 +168,16 @@ class DevConnectionCloudpebbleProxy(
     }
 
     override suspend fun stop() {
-        session?.close(CloseReason(CloseReason.Codes.NORMAL, "Stopped by user"))
-        job?.cancel()
-        job = null
+        val stopping = job
+        try {
+            session?.close(CloseReason(CloseReason.Codes.NORMAL, "Stopped by user"))
+        } finally {
+            stopping?.cancelAndJoin()
+            if (job === stopping) {
+                job = null
+                session = null
+            }
+        }
     }
 
     companion object {

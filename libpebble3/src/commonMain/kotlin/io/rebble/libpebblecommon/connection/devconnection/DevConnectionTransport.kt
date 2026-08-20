@@ -12,6 +12,7 @@ import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.NonCancellable
 
 internal expect fun getTempPbwPath(): Path
 
@@ -33,20 +34,29 @@ abstract class DevConnectionTransport(private val libPebble: LibPebble) {
     abstract suspend fun stop()
 
     protected suspend fun installPBW(payload: ByteArray): Boolean {
+        var path: Path? = null
         try {
-            val path = getTempPbwPath()
+            val tempPath = getTempPbwPath()
+            path = tempPath
 
             withContext(Dispatchers.IO) {
-                SystemFileSystem.sink(path).buffered().use {
+                SystemFileSystem.sink(tempPath).buffered().use {
                     it.writeFully(payload)
                 }
             }
-            return libPebble.sideloadApp(path)
+            return libPebble.sideloadApp(tempPath)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             logger.e(e) { "Failed to save/install bundle: ${e.message}" }
             return false
+        } finally {
+            path?.let { tempPath ->
+                withContext(Dispatchers.IO + NonCancellable) {
+                    runCatching { SystemFileSystem.delete(tempPath, mustExist = false) }
+                        .onFailure { logger.w(it) { "Failed to delete temporary bundle: $tempPath" } }
+                }
+            }
         }
     }
 }

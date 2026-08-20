@@ -23,8 +23,8 @@ data class DBusNotification(
     val appName: String,
     /**
      * Notify's app_icon: a theme icon name ("icon-lock-sms"), an "image://theme/..." URI, or a path
-     * to a bitmap. Only the names are useful — the watch takes icon IDs, not images — but they are
-     * often the only signal there is, since native Sailfish apps send no category.
+     * to a bitmap. Only the names are useful because the watch takes icon IDs,
+     * not images.
      */
     val appIcon: String,
     val summary: String,
@@ -49,9 +49,9 @@ sealed class NotificationEvent {
 }
 
 /**
- * Watches the session bus for notifications the same way rockpoold did: sniff the Notify method
- * calls apps send to lipstick's org.freedesktop.Notifications server, correlate each with its
- * method return to learn the server-assigned id, and track NotificationClosed signals.
+ * Watches the session bus by monitoring Notify method calls, correlating each
+ * with its method return to learn the server-assigned ID, and tracking
+ * NotificationClosed signals.
  */
 class NotificationMonitor {
     private val logger = Logger.withTag("NotificationMonitor")

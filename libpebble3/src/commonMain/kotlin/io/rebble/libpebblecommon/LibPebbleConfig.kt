@@ -19,33 +19,54 @@ class LibPebbleConfigHolder(
     private val settings: Settings,
     private val json: Json,
 ) {
-    private fun defaultValue(): LibPebbleConfig {
-        return loadFromStorage() ?: defaultValue.also { saveToStorage(it) }
-    }
-
-    private fun loadFromStorage(): LibPebbleConfig? = settings.getStringOrNull(SETTINGS_KEY)?.let { string ->
-        try {
-            json.decodeFromString(string)
-        } catch (e: SerializationException) {
-            Logger.w("Error loading settings", e)
-            null
-        }
+    private fun decodeStored(value: String): LibPebbleConfig? = try {
+        json.decodeFromString(value)
+    } catch (e: SerializationException) {
+        Logger.w("Error loading settings", e)
+        null
     }
 
     private fun saveToStorage(value: LibPebbleConfig) {
         settings.set(SETTINGS_KEY, json.encodeToString(value))
     }
 
+    internal fun serializedLength(value: LibPebbleConfig): Int = json.encodeToString(value).length
+
     fun update(value: LibPebbleConfig) {
         saveToStorage(value)
         _config.value = value
     }
 
-    private val _config: MutableStateFlow<LibPebbleConfig> = MutableStateFlow(defaultValue())
+    private val storedValue = settings.getStringOrNull(SETTINGS_KEY)
+    private val initialValue = storedValue?.let(::decodeStored)
+
+    /** Whether the initial config was successfully decoded from durable storage. */
+    internal val configLoadedFromStorage: Boolean = initialValue != null
+
+    /**
+     * Whether this settings store was originally initialized from [defaultValue].
+     *
+     * The origin flag is persisted before the generated config so a crash cannot make a fresh
+     * default look like a user-owned pre-existing value on the next process start. Keep the flag
+     * for the lifetime of the store: later ordinary config updates do not change its origin.
+     */
+    internal val configGeneratedFromDefault: Boolean = when {
+        settings.getBoolean(CONFIG_GENERATED_FROM_DEFAULT_KEY, false) -> true
+        storedValue != null -> false
+        else -> {
+            settings.putBoolean(CONFIG_GENERATED_FROM_DEFAULT_KEY, true)
+            true
+        }
+    }
+
+    private val _config: MutableStateFlow<LibPebbleConfig> = MutableStateFlow(
+        initialValue ?: defaultValue.also { saveToStorage(it) },
+    )
     val config: StateFlow<LibPebbleConfig> = _config.asStateFlow()
 }
 
 private const val SETTINGS_KEY = "libpebble.settings"
+private const val CONFIG_GENERATED_FROM_DEFAULT_KEY = "libpebble.settings.generated-default"
 
 @Serializable
 data class LibPebbleConfig(

@@ -9,9 +9,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.flow.Flow
 import kotlin.uuid.Uuid
 
-// Platform GATT central seam: android/ios build a Kable KableGattConnector; jvm/Linux (Sailfish)
-// supplies a BlueZ D-Bus connector instead. Kable's desktop backend binds btleplug via UniFFI+JNA,
-// which doesn't work in a GraalVM native image — what the Sailfish daemon compiles to.
+// Platform GATT central seam: Android/iOS build a Kable connector; native
+// Linux supplies a BlueZ D-Bus connector instead. Kable's desktop backend
+// binds btleplug via UniFFI+JNA, which does not work in a GraalVM native image.
 expect fun libpebbleGattConnector(
     identifier: PebbleBleIdentifier,
     platformIdentifier: PlatformIdentifier,

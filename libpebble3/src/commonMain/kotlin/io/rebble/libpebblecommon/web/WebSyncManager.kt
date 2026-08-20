@@ -6,6 +6,7 @@ import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import io.rebble.libpebblecommon.locker.Locker
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.launch
 
@@ -23,16 +24,29 @@ class WebSyncManager(
     override fun requestLockerSync(): Deferred<Unit> {
         logger.d { "requestLockerSync()" }
         val result = CompletableDeferred<Unit>()
-        libPebbleCoroutineScope.launch {
-            // TODO probably don't want the logic in this class
-            val response = webServices.fetchLocker()
-            if (response == null) {
-                logger.i("locker response is null")
+        val job = libPebbleCoroutineScope.launch {
+            try {
+                // TODO probably don't want the logic in this class
+                val session = locker.captureRemoteAccountSession()
+                val response = when (val webSession = session.webSession) {
+                    null -> if (webServices.usesAccountSessions()) null else webServices.fetchLocker()
+                    else -> webServices.fetchLocker(webSession)
+                }
+                if (response == null) {
+                    throw IllegalStateException("Locker response is null")
+                }
+                locker.update(response, session)
                 result.complete(Unit)
-                return@launch
+            } catch (e: CancellationException) {
+                result.cancel(e)
+                throw e
+            } catch (t: Throwable) {
+                result.completeExceptionally(t)
+                if (t !is Exception) throw t
             }
-            locker.update(response)
-            result.complete(Unit)
+        }
+        result.invokeOnCompletion { cause ->
+            if (cause is CancellationException) job.cancel(cause)
         }
         return result
     }

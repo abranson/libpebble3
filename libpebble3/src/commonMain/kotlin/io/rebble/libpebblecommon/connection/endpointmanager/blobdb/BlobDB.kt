@@ -8,6 +8,7 @@ import com.russhwolf.settings.serialization.encodeValue
 import coredev.BlobDatabase
 import io.rebble.libpebblecommon.LibPebbleConfigFlow
 import io.rebble.libpebblecommon.NotificationConfigFlow
+import io.rebble.libpebblecommon.connection.ConnectedPebble
 import io.rebble.libpebblecommon.connection.PebbleIdentifier
 import io.rebble.libpebblecommon.database.dao.BlobDbDao
 import io.rebble.libpebblecommon.database.dao.BlobDbRecord
@@ -22,6 +23,8 @@ import io.rebble.libpebblecommon.database.dao.VibePatternDao
 import io.rebble.libpebblecommon.database.dao.WatchPrefRealDao
 import io.rebble.libpebblecommon.database.dao.WeatherAppRealDao
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntryDao
+import io.rebble.libpebblecommon.database.entity.DbTimelineItem
+import io.rebble.libpebblecommon.database.entity.TimelineNotificationEntity
 import io.rebble.libpebblecommon.database.dao.HealthSettingsEntryRealDao
 import io.rebble.libpebblecommon.database.entity.HealthStatDao
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
@@ -38,6 +41,7 @@ import io.rebble.libpebblecommon.services.blobdb.DbWrite
 import io.rebble.libpebblecommon.services.blobdb.WriteType
 import io.rebble.libpebblecommon.web.withTimeoutOr
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -48,10 +52,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlin.random.Random
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
@@ -89,6 +96,18 @@ data class BlobDbDaos(
     
     fun getVibePatternDao(): VibePatternDao = vibePatternDao
     fun getNotificationRuleDao(): io.rebble.libpebblecommon.database.dao.NotificationRuleDao = notificationRuleDao
+
+    suspend fun reconcileTimelineDatabaseAfterClear(
+        database: BlobDatabase,
+        transport: String,
+    ) {
+        when (database) {
+            BlobDatabase.Pin -> timelinePinDao.markAllDeletedFromWatch(transport)
+            BlobDatabase.Reminder -> timelineReminderDao.markAllDeletedFromWatch(transport)
+            BlobDatabase.Notification -> notificationsDao.suppressCurrentForWatch(transport)
+            else -> error("Not a timeline database: $database")
+        }
+    }
 }
 
 interface TimeProvider {
@@ -112,12 +131,14 @@ class BlobDB(
     private val notificationConfigFlow: NotificationConfigFlow,
     private val settings: Settings,
     private val libPebbleConfigFlow: LibPebbleConfigFlow,
-) {
+    private val timelineWindowProvider: TimelineWindowProvider,
+) : ConnectedPebble.TimelineControl {
     protected val watchIdentifier: String = identifier.asString
 
     companion object {
         private val BLOBDB_RESPONSE_TIMEOUT = 10.seconds
         private val QUERY_REFRESH_PERIOD = 1.hours
+        private val TIMELINE_QUERY_REFRESH_PERIOD = 3.minutes
         private val PREF_KEY_DEVICES_HAVE_SYNCED_SETTINGS = "devicesHaveSyncedSettings"
         private const val NUL_CHAR: Char = '\u0000'
     }
@@ -138,26 +159,56 @@ class BlobDB(
     ) {
         val initialTimestamp = timeProvider.now()
         watchScope.launch {
+            val refreshPeriod = when (dao) {
+                is TimelinePinRealDao,
+                is TimelineReminderRealDao,
+                is TimelineNotificationRealDao -> TIMELINE_QUERY_REFRESH_PERIOD
+                else -> QUERY_REFRESH_PERIOD
+            }
             val tickerFlow = flow {
                 while (true) {
                     emit(Unit)
-                    delay(QUERY_REFRESH_PERIOD)
+                    delay(refreshPeriod)
                 }
             }
-            tickerFlow
-                .flatMapLatest {
-                    logger.d { "dynamicQuery: refreshing (${dao.databaseId()}" }
-                    if (insert) {
-                        dao.dirtyRecordsForWatchInsert(
-                            transport = identifier.asString,
-                            timestampMs = timeProvider.now().toEpochMilliseconds(),
-                            insertOnlyAfterMs = initialTimestamp.toEpochMilliseconds(),
-                        )
-                    } else {
-                        dao.dirtyRecordsForWatchDelete(
-                            transport = identifier.asString,
-                            timestampMs = timeProvider.now().toEpochMilliseconds(),
-                        )
+            timelineWindowProvider.windowFor(identifier.asString)
+                .flatMapLatest { window ->
+                    tickerFlow.flatMapLatest {
+                        logger.d { "dynamicQuery: refreshing (${dao.databaseId()}" }
+                        val now = timeProvider.now().toEpochMilliseconds()
+                        val windowStart = now + window.pastDays.days.inWholeMilliseconds
+                        val windowEnd = now + window.futureDays.days.inWholeMilliseconds
+                        when (dao) {
+                            is TimelinePinRealDao -> if (insert) {
+                                dao.dirtyRecordsForWatchInsertInWindow(identifier.asString, windowStart, windowEnd)
+                            } else {
+                                dao.dirtyRecordsForWatchDeleteOutsideWindow(identifier.asString, windowStart, windowEnd)
+                            }
+                            is TimelineReminderRealDao -> if (insert) {
+                                dao.dirtyRecordsForWatchInsertInWindow(identifier.asString, windowStart, windowEnd)
+                            } else {
+                                dao.dirtyRecordsForWatchDeleteOutsideWindow(identifier.asString, windowStart, windowEnd)
+                            }
+                            is TimelineNotificationRealDao -> if (insert) {
+                                dao.dirtyRecordsForWatchInsertInWindow(
+                                    identifier.asString,
+                                    windowStart,
+                                    now + window.notificationFadeSeconds.seconds.inWholeMilliseconds,
+                                    windowEnd,
+                                )
+                            } else {
+                                dao.dirtyRecordsForWatchDelete(identifier.asString, now)
+                            }
+                            else -> if (insert) {
+                                dao.dirtyRecordsForWatchInsert(
+                                    transport = identifier.asString,
+                                    timestampMs = now,
+                                    insertOnlyAfterMs = initialTimestamp.toEpochMilliseconds(),
+                                )
+                            } else {
+                                dao.dirtyRecordsForWatchDelete(identifier.asString, now)
+                            }
+                        }
                     }
                 }
                 .conflate()
@@ -168,6 +219,48 @@ class BlobDB(
                     delay(1.seconds)
                 }
         }
+    }
+
+    /**
+     * A window update can race with a Room flow result already waiting behind
+     * [operationLock]. Check the latest per-watch window immediately before
+     * writing so an old result cannot repopulate an excluded record.
+     */
+    private suspend fun isCurrentTimelineEligibility(
+        dao: BlobDbDao<BlobDbRecord>,
+        item: BlobDbRecord,
+        insert: Boolean,
+    ): Boolean {
+        if (dao !is TimelinePinRealDao && dao !is TimelineReminderRealDao && dao !is TimelineNotificationRealDao) {
+            return true
+        }
+        val timestamp = (item.record as? DbTimelineItem)?.content?.timestamp?.instant
+            ?.toEpochMilliseconds() ?: return true
+        val now = timeProvider.now().toEpochMilliseconds()
+        val window = timelineWindowProvider.windowFor(identifier.asString).value
+        val windowStart = now + window.pastDays.days.inWholeMilliseconds
+        val windowEnd = now + window.futureDays.days.inWholeMilliseconds
+        val isWithinCurrentWindow = if (insert) {
+            timestamp > windowStart && timestamp < windowEnd &&
+                (dao !is TimelineNotificationRealDao ||
+                    timestamp >= now + window.notificationFadeSeconds.seconds.inWholeMilliseconds)
+        } else {
+            dao !is TimelineNotificationRealDao &&
+                (item.deleted || timestamp <= windowStart || timestamp >= windowEnd)
+        }
+        if (!isWithinCurrentWindow) return false
+        if (insert && dao is TimelineNotificationRealDao) {
+            val notification = item as? TimelineNotificationEntity ?: return false
+            // A Room flow can already be queued behind operationLock when Reset Timeline writes
+            // suppression markers. Recheck the marker in the same critical section as the send so
+            // that pre-reset pending notifications cannot leak through after the clear.
+            return dao.isPendingForWatch(
+                transport = identifier.asString,
+                recordId = notification.record.itemId,
+                recordHashcode = notification.recordHashcode,
+            )
+        }
+        return true
     }
 
     fun init(
@@ -267,36 +360,77 @@ class BlobDB(
             if (unfaithful || !previouslyConnected) {
                 logger.d("unfaithful: wiping DBs on watch")
                 // Clear all DBs on watch (whether we have local DBs for them or not)
-                BlobDatabase.entries.forEach { db ->
-                    if (db.sendClear) {
-                        sendWithTimeout(
-                            BlobCommand.ClearCommand(
-                                token = generateToken(),
-                                database = db,
+                operationLock.withLock {
+                    BlobDatabase.entries.forEach { db ->
+                        if (db.sendClear) {
+                            sendWithTimeout(
+                                BlobCommand.ClearCommand(
+                                    token = generateToken(),
+                                    database = db,
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
 
             blobDatabases.get().forEach { db ->
-                db.deleteStaleRecords(timeProvider.now().toEpochMilliseconds())
+                val now = timeProvider.now().toEpochMilliseconds()
+                when (db) {
+                    is TimelinePinRealDao -> db.deleteStaleRecords(
+                        now - TimelineWindow.MAX_DAYS.days.inWholeMilliseconds,
+                    )
+                    is TimelineReminderRealDao -> db.deleteStaleRecords(
+                        now - TimelineWindow.MAX_DAYS.days.inWholeMilliseconds,
+                    )
+                    is TimelineNotificationRealDao -> db.deleteStaleRecords(
+                        now - TimelineWindow.MAX_NOTIFICATION_FADE_SECONDS.seconds.inWholeMilliseconds,
+                    )
+                    else -> db.deleteStaleRecords(now)
+                }
                 dynamicQuery(dao = db, insert = true) { dirty ->
                     dirty.forEach { item ->
                         operationLock.withLock {
-                            handleInsert(db, item, params, blobDbVersion)
+                            if (isCurrentTimelineEligibility(db, item, insert = true)) {
+                                handleInsert(db, item, params, blobDbVersion)
+                            }
                         }
                     }
                 }
                 dynamicQuery(dao = db, insert = false) { dirty ->
                     dirty.forEach { item ->
                         operationLock.withLock {
-                            handleDelete(db, item)
+                            if (isCurrentTimelineEligibility(db, item, insert = false)) {
+                                handleDelete(db, item)
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    override suspend fun resetTimeline(): Boolean = operationLock.withLock {
+        resetTimelineDatabases(
+            clear = { database ->
+                sendWithTimeout(
+                    BlobCommand.ClearCommand(
+                        token = generateToken(),
+                        database = database,
+                    ),
+                )
+            },
+            reconcileCleared = { database ->
+                blobDatabases.reconcileTimelineDatabaseAfterClear(database, watchIdentifier)
+            },
+            onFailure = { database, cause ->
+                if (cause == null) {
+                    logger.w { "watch rejected or timed out clearing timeline database $database" }
+                } else {
+                    logger.w(cause) { "failed clearing timeline database $database" }
+                }
+            },
+        )
     }
 
     // The watch firmware sends health settings (activityPreferences, unitsDistance,
@@ -421,6 +555,46 @@ class BlobDB(
             blobDBService.send(command)
         }
 }
+
+internal suspend fun resetTimelineDatabases(
+    clear: suspend (BlobDatabase) -> BlobResponse?,
+    reconcileCleared: suspend (BlobDatabase) -> Unit,
+    onFailure: (BlobDatabase, Throwable?) -> Unit = { _, _ -> },
+): Boolean = withContext(NonCancellable) {
+    var complete = true
+    TIMELINE_RESET_DATABASES.forEach { database ->
+        val response = try {
+            clear(database)
+        } catch (e: Exception) {
+            onFailure(database, e)
+            complete = false
+            return@forEach
+        }
+        if (response?.responseValue == BlobResponse.BlobStatus.Success) {
+            // Pins and reminders invalidate their markers so durable content is restored.
+            // Notifications instead mark every current phone-side record as suppressed, matching
+            // the legacy reset which discarded both delivered and still-pending notifications.
+            // Persist that reconciliation before moving on, but keep attempting later databases
+            // if the local marker write fails after the watch has committed its clear.
+            try {
+                reconcileCleared(database)
+            } catch (e: Exception) {
+                onFailure(database, e)
+                complete = false
+            }
+        } else {
+            onFailure(database, null)
+            complete = false
+        }
+    }
+    complete
+}
+
+private val TIMELINE_RESET_DATABASES = listOf(
+    BlobDatabase.Pin,
+    BlobDatabase.Reminder,
+    BlobDatabase.Notification,
+)
 
 private fun UByteArray.keyAsString(db: BlobDatabase): String = when {
     db.keyIsUuid() -> try {

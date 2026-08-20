@@ -87,8 +87,10 @@ import io.rebble.libpebblecommon.connection.endpointmanager.RealLanguagePackInst
 import io.rebble.libpebblecommon.connection.endpointmanager.audio.VoiceSessionManager
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.BlobDB
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.BlobDbDaos
+import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.DefaultTimelineWindowProvider
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.RealTimeProvider
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimeProvider
+import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimelineWindowProvider
 import io.rebble.libpebblecommon.connection.endpointmanager.musiccontrol.MusicControlManager
 import io.rebble.libpebblecommon.connection.endpointmanager.phonecontrol.PhoneControlManager
 import io.rebble.libpebblecommon.connection.endpointmanager.putbytes.PutBytesSession
@@ -436,6 +438,7 @@ fun initKoin(
                 singleOf(::NotificationApi) bind NotificationApps::class
                 singleOf(::RealBluetoothStateProvider) bind BluetoothStateProvider::class
                 singleOf(::RealTimeProvider) bind TimeProvider::class
+                singleOf(::DefaultTimelineWindowProvider) bind TimelineWindowProvider::class
                 singleOf(::DevConnectionServer)
                 singleOf(::RealBlobDbDatabaseManager) bind BlobDbDatabaseManager::class
                 single {
@@ -444,7 +447,7 @@ fun initKoin(
                         url = "wss://cloudpebble-proxy.repebble.com/device-v2",
                         protocolVersion = CloudpebbleProxyProtocolVersion.V2,
                         scope = get(),
-                        token = proxyTokenProvider
+                        token = proxyTokenProvider,
                     )
                 }
                 single { HttpClient() }

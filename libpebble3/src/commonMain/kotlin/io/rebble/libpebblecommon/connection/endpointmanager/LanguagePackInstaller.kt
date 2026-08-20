@@ -48,7 +48,7 @@ class RealLanguagePackInstaller(
             val path = when {
                 sideloadPath != null -> sideloadPath
                 url != null -> {
-                    val downloadedPath = firmwareDownloader.downloadFirmware(url, "pbl")
+                    val downloadedPath = firmwareDownloader.downloadLanguagePack(url)
                     if (downloadedPath == null) {
                         _state.value = LanguagePackInstallState.Idle(previousError = "Failed to download language pack")
                         return@launch

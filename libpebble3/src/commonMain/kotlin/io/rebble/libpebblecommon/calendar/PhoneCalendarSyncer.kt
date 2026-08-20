@@ -5,6 +5,7 @@ import io.rebble.libpebblecommon.SystemAppIDs.CALENDAR_APP_UUID
 import io.rebble.libpebblecommon.WatchConfigFlow
 import io.rebble.libpebblecommon.connection.Calendar
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimeProvider
+import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimelineWindowProvider
 import io.rebble.libpebblecommon.database.dao.CalendarDao
 import io.rebble.libpebblecommon.database.dao.TimelinePinRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineReminderRealDao
@@ -38,6 +39,7 @@ class PhoneCalendarSyncer(
     private val timelineReminderDao: TimelineReminderRealDao,
     private val watchConfig: WatchConfigFlow,
     private val vibePatternDao: VibePatternDao,
+    private val timelineWindowProvider: TimelineWindowProvider,
 ) : Calendar {
     private val logger = Logger.withTag("PhoneCalendarSyncer")
     private val syncTrigger = MutableSharedFlow<Unit>()
@@ -57,16 +59,13 @@ class PhoneCalendarSyncer(
             requestSync()
             tryStartListeningForChanges()
             libPebbleCoroutineScope.launch {
-                watchConfig.flow
-                    .map {
-                        with(it.watchConfig) {
-                            listOf(
-                                calendarPins,
-                                calendarReminders,
-                                calendarShowDeclinedEvents,
-                                overrideCalendarVibePattern,
-                            )
-                        }
+                timelineWindowProvider.sourceWindow.drop(1).collect { requestSync() }
+            }
+            libPebbleCoroutineScope.launch {
+                watchConfig.flow.map {
+                    with(it.watchConfig) {
+                        listOf(calendarPins, calendarReminders, calendarShowDeclinedEvents, overrideCalendarVibePattern)
+                    }
                     }
                     .distinctUntilChanged()
                     .drop(1)
@@ -136,8 +135,10 @@ class PhoneCalendarSyncer(
 
         val allCalendars = calendarDao.getAll()
         val existingPins = timelinePinDao.getPinsForWatchapp(CALENDAR_APP_UUID)
-        val startDate = timeProvider.now() - 1.days
-        val endDate = (startDate + 7.days)
+        val timelineWindow = timelineWindowProvider.sourceWindow.value
+        val now = timeProvider.now()
+        val startDate = now + timelineWindow.pastDays.days
+        val endDate = now + timelineWindow.futureDays.days
         val calendarVibePattern = watchConfig.value.overrideCalendarVibePattern
             ?.let { vibePatternDao.getVibePattern(it)?.pattern }
         val newPins = allCalendars.flatMap { calendar ->

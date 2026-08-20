@@ -58,6 +58,11 @@ class NotificationApi(
     override fun notificationApps(): Flow<List<AppWithCount>> =
         notificationAppDao.allAppsWithCountsFlow()
 
+    override suspend fun forgetNotificationApp(packageName: String) {
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        notificationAppDao.markForDeletion(packageName)
+    }
+
     override fun notificationAppChannelCounts(packageName: String): Flow<List<ChannelAndCount>> =
         notificationsDao.channelNotificationCounts(packageName)
 
@@ -84,6 +89,20 @@ class NotificationApi(
                 notificationAppDao.updateAllAppMuteStates(muteState)
             }
         }
+    }
+
+    /** Daemon-only durable seam which completes only after the Room mutation commits. */
+    suspend fun persistNotificationAppMuteState(packageName: String, muteState: MuteState) {
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        notificationAppDao.updateAppMuteState(packageName, muteState)
+    }
+
+    /**
+     * Daemon restart repair for the account-global notification policy.  Unknown or removed
+     * policy sources become permissive; explicit disabled sources remain muted.
+     */
+    suspend fun reconcileNotificationAppMuteStates(muteStates: Map<String, MuteState>) {
+        notificationAppDao.reconcileAppMuteStates(muteStates)
     }
 
     override fun updateNotificationAppState(

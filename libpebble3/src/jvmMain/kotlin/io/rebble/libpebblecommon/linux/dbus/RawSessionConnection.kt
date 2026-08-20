@@ -12,7 +12,7 @@ import org.freedesktop.dbus.types.UInt32
  * Raw session-bus connection for the two things dbus-java's high-level connection can't do:
  * becoming a bus monitor (its dispatcher would try to reply to sniffed method calls, which the
  * bus kills monitors for), and calling methods on arbitrary interfaces without pre-declared
- * Java interface classes (needed for lipstick's free-form x-nemo remote actions).
+ * Java interface classes.
  */
 class RawSessionConnection private constructor(
     private val transport: AbstractTransport,

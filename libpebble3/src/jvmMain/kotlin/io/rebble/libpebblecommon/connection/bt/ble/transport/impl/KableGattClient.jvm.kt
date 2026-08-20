@@ -11,8 +11,9 @@ actual fun peripheralFromIdentifier(
     TODO("Not yet implemented")
 }
 
-actual suspend fun Peripheral.requestMtuNative(mtu: Int): Int {
-    return mtu
-}
+// btleplug auto-negotiates the MTU; the common client re-adds the 3-byte ATT overhead in
+// getMtu(), so there is nothing platform-specific to request here. Native
+// Linux normally uses the BlueZ connector, but the JVM actual must still exist.
+actual suspend fun Peripheral.requestMtuNative(mtu: Int): Int = mtu
 
 actual suspend fun Peripheral.refreshServicesNative(): Boolean = false

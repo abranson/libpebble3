@@ -1,6 +1,7 @@
 package io.rebble.libpebblecommon.database.dao
 
 import androidx.room.Dao
+import androidx.room.Query
 import androidx.room.Transaction
 import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.database.asMillisecond
@@ -13,6 +14,8 @@ import io.rebble.libpebblecommon.database.entity.HealthGender
 import io.rebble.libpebblecommon.database.entity.HealthSettingsEntry
 import io.rebble.libpebblecommon.database.entity.HealthSettingsEntryDao
 import io.rebble.libpebblecommon.database.entity.HealthSettingsEntrySyncEntity
+import io.rebble.libpebblecommon.database.entity.setWatchSettings
+import io.rebble.libpebblecommon.health.HealthSettings
 import io.rebble.libpebblecommon.database.entity.HeartRatePreferencesBlobItem
 import io.rebble.libpebblecommon.database.entity.HeartRatePreferencesValue
 import io.rebble.libpebblecommon.database.entity.HeartRatePreferencesValue.Companion.encodeToString
@@ -21,6 +24,7 @@ import io.rebble.libpebblecommon.database.entity.HrmPreferencesValue
 import io.rebble.libpebblecommon.database.entity.HrmPreferencesValue.Companion.encodeToString
 import io.rebble.libpebblecommon.database.entity.UnitsDistanceValue
 import io.rebble.libpebblecommon.database.entity.UnitsDistanceValue.Companion.encodeToString
+import io.rebble.libpebblecommon.database.entity.defaultHealthSettings
 import io.rebble.libpebblecommon.packets.blobdb.BlobResponse
 import io.rebble.libpebblecommon.services.blobdb.DbWrite
 import io.rebble.libpebblecommon.util.DataBuffer
@@ -28,6 +32,32 @@ import kotlin.time.Instant
 
 @Dao
 interface HealthSettingsEntryRealDao : HealthSettingsEntryDao {
+    /** Persist the four-part health settings record as one durable Room transaction. */
+    @Transaction
+    suspend fun setWatchSettingsTransactionally(settings: HealthSettings) {
+        setWatchSettings(settings)
+    }
+
+    /**
+     * Initialize the complete health-settings record only when no part of it has ever been stored.
+     *
+     * The ordinary settings flow substitutes value defaults for missing rows, so value equality
+     * cannot distinguish a fresh database from deliberately saved defaults. Treat any raw row,
+     * including a partial or deleted one, as authoritative and preserve it.
+     */
+    @Transaction
+    suspend fun initializeIfAbsent(
+        transform: (HealthSettings) -> HealthSettings,
+    ): HealthSettings? {
+        if (hasPersistedHealthSettings()) return null
+        val initialized = transform(defaultHealthSettings())
+        setWatchSettings(initialized)
+        return initialized
+    }
+
+    @Query("SELECT EXISTS(SELECT 1 FROM HealthSettingsEntryEntity)")
+    suspend fun hasPersistedHealthSettings(): Boolean
+
     @Transaction
     override suspend fun handleWrite(write: DbWrite, transport: String, params: ValueParams): BlobResponse.BlobStatus {
         val key = write.key.toByteArray().decodeToString().trimEnd('\u0000')

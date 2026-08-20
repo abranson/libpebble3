@@ -8,15 +8,23 @@ import io.rebble.libpebblecommon.connection.OtherPebbleApps
 import io.rebble.libpebblecommon.connection.PhoneCapabilities
 import io.rebble.libpebblecommon.connection.PlatformFlags
 import io.rebble.libpebblecommon.connection.bt.ble.BlePlatformConfig
+import io.rebble.libpebblecommon.connection.bt.classic.pebble.BtClassicConnector
 import io.rebble.libpebblecommon.connection.bt.classic.transport.ClassicScanner
+import io.rebble.libpebblecommon.connection.bt.classic.transport.JvmBtClassicConnector
 import io.rebble.libpebblecommon.connection.bt.classic.transport.JvmClassicScanner
+import io.rebble.libpebblecommon.connection.bt.classic.transport.LinuxRfcommSocketFactory
+import io.rebble.libpebblecommon.connection.bt.classic.transport.UnavailableLinuxRfcommSocketFactory
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNotificationActionHandler
 import io.rebble.libpebblecommon.contacts.SystemContacts
 import io.rebble.libpebblecommon.linux.music.LinuxSystemMusicControl
+import io.rebble.libpebblecommon.linux.InactiveLinuxDeviceActivity
+import io.rebble.libpebblecommon.linux.LinuxDeviceActivity
 import io.rebble.libpebblecommon.linux.music.MprisController
 import io.rebble.libpebblecommon.linux.music.MprisVolume
 import io.rebble.libpebblecommon.linux.music.VolumeControl
 import io.rebble.libpebblecommon.linux.notifications.FreedesktopHintMapper
+import io.rebble.libpebblecommon.linux.notifications.FreedesktopNotificationBackend
+import io.rebble.libpebblecommon.linux.notifications.LinuxNotificationBackend
 import io.rebble.libpebblecommon.linux.notifications.LinuxNotificationActionHandler
 import io.rebble.libpebblecommon.linux.notifications.LinuxNotificationListener
 import io.rebble.libpebblecommon.linux.notifications.NotificationHintMapper
@@ -28,6 +36,7 @@ import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
 import io.rebble.libpebblecommon.util.SystemGeolocation
 import org.koin.core.module.Module
 import org.koin.core.module.dsl.singleOf
+import org.koin.core.module.dsl.scopedOf
 import org.koin.dsl.bind
 import org.koin.dsl.module
 
@@ -35,11 +44,9 @@ import org.koin.dsl.module
  * Generic Linux bindings — freedesktop interfaces only (BlueZ, MPRIS, org.freedesktop.Notifications),
  * so they work on any distro with a session bus.
  *
- * A specific distro layers its own on top by passing a module to
- * [io.rebble.libpebblecommon.connection.LibPebble3.create]'s `platformOverrides`; the Sailfish set
- * lives in the :libpebble3d-sailfish module's sailfishModule. Bindings here that a distro is
- * expected to improve on are marked. This module must not reference any distro-specific class —
- * that would defeat the split, and downstream daemons would drag Sailfish code into their image.
+ * A specific distro layers its own bindings on top through
+ * [io.rebble.libpebblecommon.connection.LibPebble3.create]'s
+ * `platformOverrides`. This module must not reference a distro-specific class.
  */
 actual val platformModule: Module = module {
     single {
@@ -67,9 +74,12 @@ actual val platformModule: Module = module {
         )
     }
 
-    // Notifications: sniffing org.freedesktop.Notifications is portable; the hint mapping is not,
-    // so a distro overrides NotificationHintMapper rather than the listener.
+    // Notifications: generic Linux uses the freedesktop session bus. A distro
+    // can override only LinuxNotificationBackend while retaining libpebble3's
+    // pin, replacement, appearance, mute, and watch-action processing.
+    single { InactiveLinuxDeviceActivity } bind LinuxDeviceActivity::class
     singleOf(::FreedesktopHintMapper) bind NotificationHintMapper::class
+    singleOf(::FreedesktopNotificationBackend) bind LinuxNotificationBackend::class
     singleOf(::LinuxNotificationListener) bind NotificationListenerConnection::class
     singleOf(::LinuxNotificationActionHandler) bind PlatformNotificationActionHandler::class
 
@@ -80,8 +90,8 @@ actual val platformModule: Module = module {
     singleOf(::MprisVolume) bind VolumeControl::class
     singleOf(::LinuxSystemMusicControl) bind SystemMusicControl::class
 
-    // No portable freedesktop equivalent: calendar, contacts, calls and geolocation all differ per
-    // distro (mkcal vs EDS, qtcontacts vs EDS, nemo voicecall vs oFono, geoclue 0.12 vs 2.x).
+    // No portable freedesktop equivalent: calendar, contacts, calls and
+    // geolocation all use distro-specific services.
     singleOf(::JvmSystemCalendar) bind SystemCalendar::class
     singleOf(::JvmSystemContacts) bind SystemContacts::class
     singleOf(::JvmLegacyPhoneReceiver) bind LegacyPhoneReceiver::class
@@ -93,6 +103,13 @@ actual val platformModule: Module = module {
     singleOf(::JvmSystemCallLog) bind SystemCallLog::class
     singleOf(::JvmOtherPebbleApps) bind OtherPebbleApps::class
 
-    // BT Classic is unsupported on desktop; the scanner yields nothing.
+    // BlueZ provides Classic discovery; direct RFCOMM is supplied through the factory below.
     singleOf(::JvmClassicScanner) bind ClassicScanner::class
+
+    // Generic Linux currently has no direct outbound RFCOMM implementation. A
+    // platform can override this factory when it supplies one.
+    single<LinuxRfcommSocketFactory> { UnavailableLinuxRfcommSocketFactory }
+    scope<ConnectionScope> {
+        scopedOf(::JvmBtClassicConnector) bind BtClassicConnector::class
+    }
 }

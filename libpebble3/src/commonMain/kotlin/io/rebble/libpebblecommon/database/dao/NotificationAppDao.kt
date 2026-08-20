@@ -113,6 +113,31 @@ interface NotificationAppRealDao : NotificationAppItemDao {
         })
     }
 
+    /**
+     * Reconcile every known application's durable mute state with an external policy snapshot.
+     * Applications absent from [muteStates] inherit the permissive default.  The complete read,
+     * comparison, and write are one Room transaction so daemon restart repair cannot publish a
+     * partially reconciled database.
+     */
+    @Transaction
+    suspend fun reconcileAppMuteStates(muteStates: Map<String, MuteState>) {
+        require(muteStates.keys.none(String::isBlank)) { "packageName must not be blank" }
+        val updatedAt = Clock.System.now().asMillisecond()
+        val updates = allApps().mapNotNull { existing ->
+            val desired = muteStates[existing.packageName] ?: MuteState.Never
+            if (existing.muteState == desired && existing.muteExpiration == null) {
+                null
+            } else {
+                existing.copy(
+                    muteState = desired,
+                    stateUpdated = updatedAt,
+                    muteExpiration = null,
+                )
+            }
+        }
+        if (updates.isNotEmpty()) insertOrReplace(updates)
+    }
+
     @Transaction
     override suspend fun handleWrite(write: DbWrite, transport: String, params: ValueParams): BlobResponse.BlobStatus {
         val writeItem = write.asNotificationAppItem()

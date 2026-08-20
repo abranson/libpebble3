@@ -82,6 +82,77 @@ interface LockerEntryRealDao : LockerEntryDao {
         updateSync(syncLimit)
     }
 
+    /**
+     * Apply one remote-locker snapshot as a single database commit.  The locker rows and any
+     * timeline children owned by removed applications must never describe different snapshots,
+     * including when the caller is cancelled or a DAO operation fails partway through.
+     */
+    @Transaction
+    suspend fun applyRemoteSnapshot(
+        entries: List<LockerEntry>,
+        removedIds: List<Uuid>,
+        syncLimit: Int,
+        timelinePinDao: TimelinePinRealDao,
+        timelineReminderDao: TimelineReminderRealDao,
+    ) {
+        insertOrReplaceAndOrder(entries, syncLimit)
+        markAllForDeletion(removedIds)
+        timelinePinDao.markAllForDeletionByParentIdsWithReminders(
+            removedIds,
+            timelineReminderDao,
+        )
+    }
+
+    /**
+     * Retire data that belongs to the signed-out account without touching local applications.
+     *
+     * Include already tombstoned rows when finding account data: a prior locker update may have
+     * hidden the application while leaving its per-app timeline token behind.
+     */
+    @Transaction
+    suspend fun retireRemoteAccountData(
+        timelinePinDao: TimelinePinRealDao,
+        timelineReminderDao: TimelineReminderRealDao,
+    ) {
+        val remoteIds = getRemoteAccountEntryIds()
+        if (remoteIds.isNotEmpty()) {
+            markAllForDeletion(remoteIds)
+            timelinePinDao.markAllForDeletionByParentIdsWithReminders(
+                remoteIds,
+                timelineReminderDao,
+            )
+        }
+        clearAllUserTokens()
+    }
+
+    @Query("""
+        SELECT id FROM LockerEntryEntity
+        WHERE systemApp = 0
+        AND sideloaded = 0
+    """)
+    suspend fun getRemoteAccountEntryIds(): List<Uuid>
+
+    @Query("UPDATE LockerEntryEntity SET userToken = NULL")
+    suspend fun clearAllUserTokens()
+
+    /** Visible to database regression tests so they can verify tokens are scrubbed from tombstones. */
+    @Query("SELECT COUNT(*) FROM LockerEntryEntity WHERE userToken IS NOT NULL")
+    suspend fun countUserTokensIncludingDeleted(): Int
+
+    /** Mark one application and its timeline children for deletion atomically. */
+    @Transaction
+    suspend fun markForDeletionWithTimeline(
+        id: Uuid,
+        timelinePinDao: TimelinePinRealDao,
+        timelineReminderDao: TimelineReminderRealDao,
+    ) {
+        markForDeletion(id)
+        timelinePinDao.markAllForDeletionByParentIdsWithReminders(
+            listOf(id),
+            timelineReminderDao,
+        )
+    }
+
     @Transaction
     suspend fun setOrder(id: Uuid, orderIndex: Int, syncLimit: Int) {
         val entry = getEntry(id) ?: return
@@ -94,6 +165,29 @@ interface LockerEntryRealDao : LockerEntryDao {
         updateOrder(id, orderIndex)
         updateOrder(entry.type)
         updateSync(syncLimit)
+    }
+
+    /**
+     * Atomically reorder a validated installed subset while leaving account-only and
+     * watch-incompatible entries in their existing slots.
+     */
+    @Transaction
+    suspend fun setOrder(orderedIds: List<Uuid>, syncLimit: Int): Boolean {
+        if (orderedIds.distinct().size != orderedIds.size) return false
+        val initial = getAll().associateBy { it.id }
+        if (orderedIds.any { it !in initial }) return false
+        val affectedTypes = orderedIds.mapTo(linkedSetOf()) { initial.getValue(it).type }
+
+        // Repair any pre-existing duplicate/gapped ranks before retaining the selected slots.
+        affectedTypes.forEach { updateOrder(it) }
+        val normalized = getAll().associateBy { it.id }
+        affectedTypes.forEach { type ->
+            val requested = orderedIds.filter { normalized.getValue(it).type == type }
+            val slots = requested.map { normalized.getValue(it).orderIndex }.sorted()
+            requested.zip(slots).forEach { (id, orderIndex) -> updateOrder(id, orderIndex) }
+        }
+        updateSync(syncLimit)
+        return true
     }
 
     @Query("""

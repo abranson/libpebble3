@@ -4,11 +4,12 @@ import io.rebble.libpebblecommon.connection.Weather
 import io.rebble.libpebblecommon.database.dao.WeatherAppRealDao
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntryDao
 import io.rebble.libpebblecommon.database.entity.WeatherAppEntry
-import io.rebble.libpebblecommon.database.entity.WeatherPrefsValue
-import io.rebble.libpebblecommon.database.entity.setWeatherSettings
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.uuid.Uuid
 
 class WeatherManager(
@@ -17,20 +18,28 @@ class WeatherManager(
     private val appPrefsEntryDao: AppPrefsEntryDao,
 ): Weather {
     override val currentWeather = weatherAppEntryDao.getAllFlow()
+    private val updateGeneration = atomic(0L)
+    private val updateMutex = Mutex()
 
     override fun updateWeatherData(weatherData: List<WeatherLocationData>) {
+        val generation = updateGeneration.getAndIncrement() + 1
         libPebbleCoroutineScope.launch {
-            val existing = weatherAppEntryDao.getAll()
-            val toDelete = existing.filter { existingEntry ->
-                weatherData.none { it.key == existingEntry.key }
+            updateMutex.withLock {
+                // Calls may arrive faster than the DAO can apply them. Drop queued stale
+                // snapshots, while serializing the remaining mutations so an older update
+                // can never delete data written by a newer one.
+                if (generation != updateGeneration.value) {
+                    return@withLock
+                }
+
+                weatherAppEntryDao.replaceSnapshot(
+                    entries = weatherData.mapNotNull {
+                        (it as? WeatherLocationData.WeatherLocationDataPopulated)?.toWeatherAppEntry()
+                    },
+                    orderedKeys = weatherData.map { it.key },
+                    appPrefsEntryDao = appPrefsEntryDao,
+                )
             }
-            toDelete.forEach {
-                weatherAppEntryDao.markForDeletion(it.key)
-            }
-            weatherAppEntryDao.insertOrReplace(weatherData.mapNotNull {
-                (it as? WeatherLocationData.WeatherLocationDataPopulated)?.toWeatherAppEntry()
-            })
-            appPrefsEntryDao.setWeatherSettings(WeatherPrefsValue(weatherData.map { it.key }))
         }
     }
 }

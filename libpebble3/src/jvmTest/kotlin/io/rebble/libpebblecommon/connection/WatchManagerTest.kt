@@ -55,9 +55,29 @@ import kotlin.uuid.Uuid
 class WatchManagerTest {
     // Watches present in the DB at WatchManager construction. Set before create().
     private var seededKnownWatches: List<KnownWatchItem> = emptyList()
+    private var failBondedWatchInsert = false
 
     private val knownWatchDao = object : KnownWatchDao {
         override suspend fun insertOrUpdate(watch: KnownWatchItem) {
+            seededKnownWatches = seededKnownWatches.filterNot {
+                it.transportIdentifier == watch.transportIdentifier
+            } + watch
+        }
+
+        override suspend fun insertIfMissing(watches: List<KnownWatchItem>): List<Long> {
+            if (failBondedWatchInsert) throw IllegalStateException("insert failed")
+            var nextId = 1L
+            return watches.map { watch ->
+                if (seededKnownWatches.any {
+                        it.transportIdentifier == watch.transportIdentifier
+                    }
+                ) {
+                    -1L
+                } else {
+                    seededKnownWatches += watch
+                    nextId++
+                }
+            }
         }
 
         override suspend fun knownWatches(): List<KnownWatchItem> {
@@ -65,6 +85,9 @@ class WatchManagerTest {
         }
 
         override suspend fun remove(transportIdentifier: String) {
+            seededKnownWatches = seededKnownWatches.filterNot {
+                it.transportIdentifier == transportIdentifier
+            }
         }
 
         override suspend fun setNickname(identifier: String, nickname: String?) {
@@ -91,8 +114,10 @@ class WatchManagerTest {
         override val analyticsLogger: ConnectionAnalyticsLogger,
         override val usingBtClassic: Boolean,
         override val languagePackInstaller: LanguagePackInstaller,
+        private val closeAction: () -> Unit = {},
     ) : ConnectionScope {
         override fun close() {
+            closeAction()
         }
     }
 
@@ -101,6 +126,11 @@ class WatchManagerTest {
 
     private var activeConnections = 0
     private var totalConnections = 0
+    private var connectionScopeCreations = 0
+    private var onConnectionScopeCreated: (() -> Unit)? = null
+    private var connectorDisconnectThrows = false
+    private var connectionScopeCloseThrows = false
+    private var connectionScopeFactoryThrowsOnce = false
     private var connectSuccess = false
     private var exceededMax = false
     private var lastPreviouslyConnected: Boolean? = null
@@ -141,6 +171,7 @@ class WatchManagerTest {
         }
 
         override fun disconnect() {
+            if (connectorDisconnectThrows) throw IllegalStateException("disconnect failed")
             _state.value = ConnectingPebbleState.Inactive(identifier)
             onDisconnection()
         }
@@ -178,12 +209,12 @@ class WatchManagerTest {
 
         override fun checkforFirmwareUpdate(force: Boolean) {}
     }
+    private val bluetoothState = MutableStateFlow(BluetoothState.Enabled)
     private val bluetoothStateProvider = object : BluetoothStateProvider {
         override fun init() {
         }
 
-        override val state: StateFlow<BluetoothState> =
-            MutableStateFlow(BluetoothState.Enabled).asStateFlow()
+        override val state: StateFlow<BluetoothState> = bluetoothState.asStateFlow()
 
         override val scanningAvailable: StateFlow<Boolean> =
             MutableStateFlow(true).asStateFlow()
@@ -236,7 +267,11 @@ class WatchManagerTest {
     private val blePlatformConfig =
         BlePlatformConfig(delayBleConnectionsAfterAppStart = false, delayBleDisconnections = false)
 
-    private fun create(scope: CoroutineScope): WatchManager {
+    private fun create(
+        scope: CoroutineScope,
+        supportsBtClassic: Boolean = false,
+        bondedSeeded: Boolean = true,
+    ): WatchManager {
         val libPebbleCoroutineScope = LibPebbleCoroutineScope(scope.coroutineContext)
         val connectionCoroutineScope = ConnectionCoroutineScope(scope.coroutineContext)
         val batteryWatcher = BatteryWatcher(connectionCoroutineScope)
@@ -253,6 +288,12 @@ class WatchManagerTest {
         }
         val connectionScopeFactory = object : ConnectionScopeFactory {
             override fun createScope(props: ConnectionScopeProperties): ConnectionScope {
+                connectionScopeCreations++
+                onConnectionScopeCreated?.invoke()
+                if (connectionScopeFactoryThrowsOnce) {
+                    connectionScopeFactoryThrowsOnce = false
+                    throw IllegalStateException("scope factory failed")
+                }
                 return TestConnectionScope(
                     identifier = props.identifier,
                     pebbleConnector = TestPebbleConnector(),
@@ -262,6 +303,9 @@ class WatchManagerTest {
                     analyticsLogger = analyticsLogger,
                     usingBtClassic = false,
                     languagePackInstaller = langPackInstaller,
+                    closeAction = {
+                        if (connectionScopeCloseThrows) throw IllegalStateException("scope close failed")
+                    },
                 )
             }
         }
@@ -285,6 +329,12 @@ class WatchManagerTest {
             }
         }
         val testSettings = PropertiesSettings(Properties())
+        // Bonded-watch seeding is covered by BondedWatchSeederJvmTest. Keep these WatchManager
+        // lifecycle tests independent of a real system-bus BlueZ service.
+        testSettings.putBoolean("seeded_bonded_watches_v1", bondedSeeded)
+        val managerBlePlatformConfig = blePlatformConfig.copy(
+            supportsBtClassic = supportsBtClassic,
+        )
         return WatchManager(
             knownWatchDao = knownWatchDao,
             pebbleDeviceFactory = pebbleDeviceFactory,
@@ -295,7 +345,7 @@ class WatchManagerTest {
             scanning = HackyProvider { scanning },
             watchConfig = watchConfig,
             clock = Clock.System,
-            blePlatformConfig = blePlatformConfig,
+            blePlatformConfig = managerBlePlatformConfig,
             connectionFailureHandler = connectionFailureHandler,
             analytics = analytics,
             blobDbDatabaseManager = blobDbManager,
@@ -304,7 +354,7 @@ class WatchManagerTest {
             legacyBtClassicMigrator = LegacyBtClassicMigrator(
                 knownWatchDao = knownWatchDao,
                 settings = testSettings,
-                blePlatformConfig = blePlatformConfig,
+                blePlatformConfig = managerBlePlatformConfig,
             ),
         )
     }
@@ -334,6 +384,395 @@ class WatchManagerTest {
             watchManager.watches.first { totalConnections >= i && it.any { it is ConnectingPebbleDevice } }
         }
         assertFalse(exceededMax)
+    }
+
+    @Test
+    fun immediateConnectionRequestThenCancellationDoesNotStartConnector() = runTest {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.requestDisconnectionImmediately(identifier)
+        yield()
+
+        assertEquals(0, totalConnections)
+    }
+
+    @Test
+    fun cancelledImmediateConnectionDoesNotResumeWhenBluetoothIsEnabled() = runTest {
+        bluetoothState.value = BluetoothState.Disabled
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.requestDisconnectionImmediately(identifier)
+        bluetoothState.value = BluetoothState.Enabled
+        yield()
+
+        assertEquals(0, totalConnections)
+    }
+
+    @Test
+    fun awaitConnectionRetiredPreventsCancelledAttemptFromReappearing() = runTest {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 1 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+
+        watchManager.requestDisconnectionImmediately(identifier)
+        watchManager.awaitConnectionRetired(identifier)
+        watchManager.watches.first { devices ->
+            devices.none { device ->
+                device is ActiveDevice || device is ConnectingPebbleDevice
+            }
+        }
+        yield()
+
+        assertFalse(
+            watchManager.watches.value.any { device ->
+                device is ActiveDevice || device is ConnectingPebbleDevice
+            },
+        )
+    }
+
+    @Test
+    fun concurrentStateFlowUpdateDoesNotCreateDuplicateConnectionScopes() = runTest {
+        lateinit var watchManager: WatchManager
+        onConnectionScopeCreated = {
+            onConnectionScopeCreated = null
+            watchManager.addScanResult(PebbleScanResult(identifier, name, -49, null))
+        }
+        watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, -50, null))
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 1 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+
+        assertEquals(1, connectionScopeCreations)
+    }
+
+    @Test
+    fun disconnectFailureStillRetiresConnectionBeforeRetry() = runTest(timeout = 5.seconds) {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 1 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+
+        connectorDisconnectThrows = true
+        watchManager.requestDisconnectionImmediately(identifier)
+        watchManager.awaitConnectionRetired(identifier)
+        connectorDisconnectThrows = false
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 2 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+    }
+
+    @Test
+    fun scopeCloseFailureStillRetiresConnectionBeforeRetry() = runTest(timeout = 5.seconds) {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 1 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+
+        connectionScopeCloseThrows = true
+        watchManager.requestDisconnectionImmediately(identifier)
+        watchManager.awaitConnectionRetired(identifier)
+        connectionScopeCloseThrows = false
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 2 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+    }
+
+    @Test
+    fun scopeFactoryFailureRetiresGoalAndAllowsExplicitRetry() = runTest(timeout = 5.seconds) {
+        connectionScopeFactoryThrowsOnce = true
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(PebbleScanResult(identifier, name, 0, null))
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first { devices ->
+            devices.singleOrNull()?.let { device ->
+                device !is ActiveDevice &&
+                    device !is ConnectingPebbleDevice &&
+                    device.connectionFailureInfo?.reason == ConnectionFailureReason.FailedToConnect
+            } == true
+        }
+        assertEquals(1, connectionScopeCreations)
+        assertEquals(0, totalConnections)
+
+        watchManager.requestConnectionImmediately(identifier)
+        watchManager.watches.first {
+            totalConnections == 1 && it.any { device -> device is ConnectingPebbleDevice }
+        }
+        assertEquals(2, connectionScopeCreations)
+    }
+
+    private fun bondedCandidate(
+        name: String = "Pebble Time Le D7CD",
+        leAddress: String? = "D0:81:0A:D4:D7:CD",
+        classicAddress: String? = null,
+        aliases: Int = 0,
+    ): BondedWatchCandidate {
+        val fallback = leAddress ?: classicAddress ?: error("candidate needs an address")
+        return BondedWatchCandidate(
+            identity = bondedWatchIdentity(name, fallback),
+            name = name,
+            addresses = buildMap {
+                leAddress?.let { put(TransportType.BluetoothLe, it) }
+                classicAddress?.let { put(TransportType.BluetoothClassic, it) }
+            },
+            aliases = aliases,
+        )
+    }
+
+    @Test
+    fun explicitBondImportUpdatesLiveWatchesAndIsIdempotent() = runTest {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        val candidate = bondedCandidate(aliases = 1)
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(1, 0, 1, 0),
+            watchManager.importBondedWatches(listOf(candidate)) { true },
+        )
+        val importedWatches = watchManager.watches.first {
+            it.singleOrNull() is KnownPebbleDevice
+        }
+        assertEquals("D0:81:0A:D4:D7:CD", importedWatches.single().identifier.asString)
+        assertEquals(false, seededKnownWatches.single().connectGoal)
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(0, 1, 1, 0),
+            watchManager.importBondedWatches(listOf(candidate)) { false },
+        )
+        assertEquals(1, seededKnownWatches.size)
+    }
+
+    @Test
+    fun explicitBondImportCancellationWinsBeforePersistence() = runTest {
+        val watchManager = create(backgroundScope)
+
+        assertEquals(
+            BondedWatchImportOutcome.Cancelled,
+            watchManager.importBondedWatches(listOf(bondedCandidate())) { false },
+        )
+        assertEquals(emptyList<KnownWatchItem>(), seededKnownWatches)
+        assertEquals(0, watchManager.watches.value.size)
+    }
+
+    @Test
+    fun explicitBondImportIsNotBlockedByAutomaticSeedWaitingForBluetooth() = runTest {
+        bluetoothState.value = BluetoothState.Disabled
+        val watchManager = create(backgroundScope, bondedSeeded = false)
+        watchManager.init()
+        yield()
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(1, 0, 0, 0),
+            watchManager.importBondedWatches(listOf(bondedCandidate())) { true },
+        )
+        assertEquals(1, seededKnownWatches.size)
+    }
+
+    @Test
+    fun explicitBondImportPromotesMatchingScanOnlyWatch() = runTest {
+        val watchManager = create(backgroundScope)
+        watchManager.init()
+        yield()
+        watchManager.addScanResult(
+            PebbleScanResult(
+                identifier = "D0:81:0A:D4:D7:CD".asPebbleBleIdentifier(),
+                name = "Pebble Time Le D7CD",
+                rssi = -50,
+                leScanRecord = null,
+            ),
+        )
+        watchManager.watches.first { it.size == 1 }
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(1, 0, 0, 0),
+            watchManager.importBondedWatches(listOf(bondedCandidate())) { true },
+        )
+        assertEquals(1, seededKnownWatches.size)
+        assertEquals(
+            "D0:81:0A:D4:D7:CD",
+            watchManager.watches.first {
+                it.singleOrNull() is KnownPebbleDevice
+            }.single().identifier.asString,
+        )
+    }
+
+    @Test
+    fun explicitBondImportDoesNotResurrectForgetInFlight() = runTest {
+        seededKnownWatches = listOf(
+            KnownWatchItem(
+                transportIdentifier = "D0:81:0A:D4:D7:CD",
+                transportType = TransportType.BluetoothLe,
+                name = "Pebble Time Le D7CD",
+                runningFwVersion = "4.4.0",
+                serial = "Q1234567890L",
+                connectGoal = false,
+            ),
+        )
+        val watchManager = create(backgroundScope)
+        watchManager.forget("D0:81:0A:D4:D7:CD".asPebbleBleIdentifier())
+        seededKnownWatches = emptyList()
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(0, 1, 0, 0),
+            watchManager.importBondedWatches(listOf(bondedCandidate())) { true },
+        )
+        assertEquals(emptyList<KnownWatchItem>(), seededKnownWatches)
+    }
+
+    @Test
+    fun explicitBondImportPreservesExistingMetadataAcrossAliasAddress() = runTest {
+        seededKnownWatches = listOf(
+            KnownWatchItem(
+                transportIdentifier = "11:22:33:44:55:66",
+                transportType = TransportType.BluetoothLe,
+                name = "Pebble Time D7CD",
+                runningFwVersion = "4.4.0",
+                serial = "Q1234567890L",
+                connectGoal = true,
+            ),
+        )
+        val before = seededKnownWatches.single()
+        val watchManager = create(backgroundScope)
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(0, 1, 1, 0),
+            watchManager.importBondedWatches(listOf(bondedCandidate(aliases = 1))) { true },
+        )
+        assertEquals(before, seededKnownWatches.single())
+    }
+
+    @Test
+    fun existingClassicAliasSuppressesImportWhenClassicTransportIsUnavailable() = runTest {
+        seededKnownWatches = listOf(
+            KnownWatchItem(
+                transportIdentifier = "11:22:33:44:55:66",
+                transportType = TransportType.BluetoothClassic,
+                name = "unknown",
+                runningFwVersion = "4.4.0",
+                serial = "Q1234567890L",
+                connectGoal = true,
+            ),
+        )
+        val watchManager = create(backgroundScope, supportsBtClassic = false)
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(0, 1, 1, 0),
+            watchManager.importBondedWatches(
+                listOf(
+                    bondedCandidate(
+                        leAddress = "D0:81:0A:D4:D7:CD",
+                        classicAddress = "11:22:33:44:55:66",
+                        aliases = 1,
+                    ),
+                ),
+            ) { true },
+        )
+        assertEquals(1, seededKnownWatches.size)
+    }
+
+    @Test
+    fun explicitBondImportReportsUnavailableUnsupportedAndPersistenceFailure() = runTest {
+        val watchManager = create(backgroundScope)
+        assertEquals(
+            BondedWatchImportOutcome.Unavailable,
+            watchManager.importBondedWatches(null) { true },
+        )
+        assertEquals(
+            BondedWatchImportOutcome.Completed(0, 0, 0, 1),
+            watchManager.importBondedWatches(
+                listOf(bondedCandidate(leAddress = null, classicAddress = "11:22:33:44:55:66")),
+            ) { true },
+        )
+        failBondedWatchInsert = true
+        assertEquals(
+            BondedWatchImportOutcome.PersistenceFailed,
+            watchManager.importBondedWatches(listOf(bondedCandidate())) { true },
+        )
+        assertEquals(emptyList<KnownWatchItem>(), seededKnownWatches)
+        assertEquals(0, watchManager.watches.value.size)
+    }
+
+    @Test
+    fun explicitBondImportPrefersClassicOnlyWhenTheRuntimeSupportsIt() = runTest {
+        val watchManager = create(backgroundScope, supportsBtClassic = true)
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(1, 0, 0, 0),
+            watchManager.importBondedWatches(
+                listOf(
+                    bondedCandidate(
+                        leAddress = "D0:81:0A:D4:D7:CD",
+                        classicAddress = "11:22:33:44:55:66",
+                    ),
+                ),
+            ) { true },
+        )
+        assertEquals(TransportType.BluetoothClassic, seededKnownWatches.single().transportType)
+        assertEquals("11:22:33:44:55:66", seededKnownWatches.single().transportIdentifier)
+    }
+
+    @Test
+    fun automaticBondSeedUsesDualModePlanWithoutCreatingAliases() = runTest {
+        val watchManager = create(backgroundScope, supportsBtClassic = true)
+        watchManager.init()
+        yield()
+        val aliases = listOf(
+            bondedCandidate(
+                name = "Pebble Time Le D7CD",
+                leAddress = "D0:81:0A:D4:D7:CD",
+                aliases = 0,
+            ),
+            bondedCandidate(
+                name = "Pebble Time D7CD",
+                leAddress = null,
+                classicAddress = "11:22:33:44:55:66",
+                aliases = 0,
+            ),
+        )
+
+        assertEquals(
+            BondedWatchImportOutcome.Completed(1, 0, 1, 0),
+            watchManager.seedBondedWatchesIfNeeded(aliases),
+        )
+        assertEquals(1, seededKnownWatches.size)
+        assertEquals(TransportType.BluetoothClassic, seededKnownWatches.single().transportType)
+        assertEquals(
+            1,
+            watchManager.watches.first { it.singleOrNull() is KnownPebbleDevice }.size,
+        )
     }
 
     private fun seededWatch(lastConnected: MillisecondInstant?) = KnownWatchItem(

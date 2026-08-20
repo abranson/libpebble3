@@ -8,9 +8,9 @@ import io.rebble.libpebblecommon.packets.PhoneAppVersion
 // We drive everything (notifications, music) over Pebble Protocol like the Android app, and
 // music is the only watch behaviour gated on the reported OS, so Android is the correct fit.
 //
-// These actuals stay in libpebble3's jvmMain: a JVM `actual` must compile into the same module
-// as its commonMain `expect`. The daemon entrypoint (fun main) lives in the libpebble3d-sailfish
-// module — it has no expect/actual and only assembles the generic library into a Sailfish daemon.
+// These actuals stay in libpebble3's jvmMain: a JVM `actual` must compile into
+// the same module as its commonMain `expect`. Applications provide their own
+// entrypoint and assemble the generic library for their target environment.
 actual fun getPlatform(): PhoneAppVersion.OSType = PhoneAppVersion.OSType.Android
 
 actual fun performPlatformSpecificInit() {}

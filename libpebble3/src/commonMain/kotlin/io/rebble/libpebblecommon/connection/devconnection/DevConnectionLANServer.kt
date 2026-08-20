@@ -108,6 +108,9 @@ class DevConnectionServer(libPebble: LibPebble): DevConnectionTransport(libPebbl
                                             logger.d { "Received InstallBundle message with payload size ${payload.size}" }
                                             send(InstallStatusMessage(installPBW(payload)))
                                         }
+                                        ClientMessageType.PhoneInfo -> {
+                                            send(PhoneInfoMessage())
+                                        }
                                         // Handle other message types as needed
                                         ClientMessageType.TimelinePin -> {
                                             logger.d { "Received TimelinePin message with payload size ${payload.size}" }
