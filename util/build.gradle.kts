@@ -159,8 +159,12 @@ dependencies {
     add("kspIosSimulatorArm64", libs.room.compiler)
 }
 
+val archivedGitHash = providers.environmentVariable("LIBPEBBLE3_ARCHIVE_GIT_HASH")
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
 val headSha by lazy {
-    project.providers.exec {
+    archivedGitHash ?: project.providers.exec {
         commandLine("git", "describe", "--always", "--dirty")
     }.standardOutput.asText.get().trim()
 }

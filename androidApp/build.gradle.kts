@@ -22,13 +22,18 @@ val gitVersionName = providers.exec {
 }.standardOutput.asText.map { it.trim().ifEmpty { "unknown" } }
 
 // Tag as an increasing int: 1.9.1.3 -> 10901003. Major must stay below 100, the rest below 1000.
-val gitVersionCode = gitVersionName.map { name ->
+val archivedVersionCode = providers.environmentVariable("LIBPEBBLE3_ARCHIVE_VERSION_CODE").map { value ->
+    requireNotNull(value.toIntOrNull()?.takeIf { it > 0 }) {
+        "LIBPEBBLE3_ARCHIVE_VERSION_CODE must be a positive integer"
+    }
+}
+val gitVersionCode = archivedVersionCode.orElse(gitVersionName.map { name ->
     val parts = name.split('.').map { it.toIntOrNull() ?: -1 }
     if (parts.size > 4 || parts.first() !in 0..99 || parts.any { it !in 0..999 }) {
         throw GradleException("Cannot derive versionCode from tag '$name'")
     }
     listOf(10_000_000, 100_000, 1_000, 1).zip(parts) { scale, part -> scale * part }.sum()
-}
+})
 
 android {
     namespace = "coredevices.coreapp"
