@@ -6,6 +6,7 @@ import io.rebble.libpebblecommon.database.dao.ContactDao
 import io.rebble.libpebblecommon.database.entity.ContactEntity
 import io.rebble.libpebblecommon.database.entity.MuteState
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -74,7 +75,14 @@ class PhoneContactsSyncer(
             logger.w { "Contacts permission revoked; skipping sync" }
             return
         }
-        val newContacts = systemContacts.getContacts()
+        val newContacts = try {
+            systemContacts.getContacts()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(e) { "Contacts read failed; preserving the last complete projection" }
+            return
+        }
         logger.d { "Got ${newContacts.size} contacts from device, syncing... " }
         val existingContacts = contactDao.getContacts()
         existingContacts.forEach { existingContact ->
