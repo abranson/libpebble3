@@ -349,6 +349,7 @@ class PhoneCalendarSyncerJvmTest {
         timelineReminderDao = database.timelineReminderDao(),
         watchConfig = watchConfig.asFlow(),
         timelineWindowProvider = DefaultTimelineWindowProvider(),
+        vibePatternDao = database.vibePatternDao(),
         retryDelay = retryDelay,
     )
 

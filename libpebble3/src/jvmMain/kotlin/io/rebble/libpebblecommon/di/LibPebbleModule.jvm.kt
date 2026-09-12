@@ -58,6 +58,7 @@ actual val platformModule: Module = module {
         PhoneCapabilities(
             CommonPhoneCapabilities + setOf(
                 ProtocolCapsFlag.SupportsExtendedMusicProtocol,
+                ProtocolCapsFlag.SupportsImageFetch,
                 ProtocolCapsFlag.SupportsSendTextApp,
                 ProtocolCapsFlag.SupportsTwoWayDismissal,
             )
@@ -86,6 +87,7 @@ actual val platformModule: Module = module {
     single { InactiveLinuxDeviceActivity } bind LinuxDeviceActivity::class
     singleOf(::FreedesktopHintMapper) bind NotificationHintMapper::class
     singleOf(::FreedesktopNotificationBackend) bind LinuxNotificationBackend::class
+    single { io.rebble.libpebblecommon.linux.notifications.LinuxNotificationImageStore() } bind io.rebble.libpebblecommon.imaging.NotificationImageProvider::class
     singleOf(::LinuxNotificationListener) bind NotificationListenerConnection::class
     singleOf(::LinuxNotificationActionHandler) bind PlatformNotificationActionHandler::class
 

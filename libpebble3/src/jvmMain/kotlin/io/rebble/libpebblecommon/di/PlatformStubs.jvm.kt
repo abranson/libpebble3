@@ -73,6 +73,13 @@ internal class JvmLegacyPhoneReceiver : LegacyPhoneReceiver {
 }
 
 internal class JvmSystemMusicControl : SystemMusicControl {
+    // Linux has no album-art source yet; preserve its existing music behavior.
+    override val supportsAlbumArt = false
+    override val albumArtUpdated = kotlinx.coroutines.flow.emptyFlow<Unit>()
+    override suspend fun getAlbumArt(
+        title: String, artist: String, width: Int, height: Int,
+    ): io.rebble.libpebblecommon.imaging.EncodedImage? = null
+
     override fun play() {}
     override fun pause() {}
     override fun playPause() {}

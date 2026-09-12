@@ -16,7 +16,7 @@ actual fun libpebbleGattConnector(
     blePlatformConfig: BlePlatformConfig,
 ): GattConnector = KableGattConnector(
     identifier = identifier,
-    peripheral = (platformIdentifier as PlatformIdentifier.BlePlatformIdentifier).peripheral,
+    platformIdentifier = platformIdentifier as PlatformIdentifier.BlePlatformIdentifier,
     scope = scope,
     blePlatformConfig = blePlatformConfig,
 )

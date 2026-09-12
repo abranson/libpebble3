@@ -21,6 +21,7 @@ class WeatherManagerTest {
         val snapshots = mutableListOf<Snapshot>()
         val weatherDao = proxy<WeatherAppRealDao> { method, args ->
             when (method.name) {
+                "getAllFlow" -> kotlinx.coroutines.flow.emptyFlow<List<WeatherAppEntry>>()
                 "replaceSnapshot" -> snapshots += Snapshot(
                     entries = args!![0] as List<WeatherAppEntry>,
                     keys = args[1] as List<Uuid>,

@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 46,
-    "identityHash": "63a1c6f76588bded46b9dea33dc82a76",
+    "identityHash": "16e96da70b3738f0b51beae655878599",
     "entities": [
       {
         "tableName": "KnownWatchItem",
@@ -855,7 +855,7 @@
       },
       {
         "tableName": "CalendarEntity",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `platformId` TEXT NOT NULL, `name` TEXT NOT NULL, `ownerName` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `color` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `syncEvents` INTEGER NOT NULL DEFAULT 1, `visible` INTEGER NOT NULL DEFAULT 1, `writable` INTEGER NOT NULL DEFAULT 1)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `platformId` TEXT NOT NULL, `name` TEXT NOT NULL, `ownerName` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `color` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `syncEvents` INTEGER NOT NULL DEFAULT 1, `visible` INTEGER NOT NULL DEFAULT 1)",
         "fields": [
           {
             "fieldPath": "id",
@@ -909,13 +909,6 @@
           {
             "fieldPath": "visible",
             "columnName": "visible",
-            "affinity": "INTEGER",
-            "notNull": true,
-            "defaultValue": "1"
-          },
-          {
-            "fieldPath": "writable",
-            "columnName": "writable",
             "affinity": "INTEGER",
             "notNull": true,
             "defaultValue": "1"
@@ -1894,11 +1887,191 @@
             "createSql": "CREATE INDEX IF NOT EXISTS `index_NotificationRuleEntity_targetType_target` ON `${TABLE_NAME}` (`targetType`, `target`)"
           }
         ]
+      },
+      {
+        "tableName": "SendTextContactEntity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recordHashcode` INTEGER NOT NULL, `deleted` INTEGER NOT NULL, `sync` INTEGER NOT NULL DEFAULT 1, `contactId` TEXT NOT NULL, `name` TEXT NOT NULL, `methodsJson` TEXT NOT NULL, PRIMARY KEY(`contactId`))",
+        "fields": [
+          {
+            "fieldPath": "recordHashcode",
+            "columnName": "recordHashcode",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deleted",
+            "columnName": "deleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sync",
+            "columnName": "sync",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          },
+          {
+            "fieldPath": "record.contactId",
+            "columnName": "contactId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "record.name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "record.methodsJson",
+            "columnName": "methodsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "contactId"
+          ]
+        }
+      },
+      {
+        "tableName": "SendTextContactSyncEntity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recordId` TEXT NOT NULL, `transport` TEXT NOT NULL, `watchSynchHashcode` INTEGER NOT NULL, PRIMARY KEY(`recordId`, `transport`), FOREIGN KEY(`recordId`) REFERENCES `SendTextContactEntity`(`contactId`) ON UPDATE CASCADE ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "recordId",
+            "columnName": "recordId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "watchSynchHashcode",
+            "columnName": "watchSynchHashcode",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "recordId",
+            "transport"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "SendTextContactEntity",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "recordId"
+            ],
+            "referencedColumns": [
+              "contactId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "SendTextCannedResponsesEntity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recordHashcode` INTEGER NOT NULL, `deleted` INTEGER NOT NULL, `sync` INTEGER NOT NULL DEFAULT 1, `source` TEXT NOT NULL, `responsesJson` TEXT NOT NULL, PRIMARY KEY(`source`))",
+        "fields": [
+          {
+            "fieldPath": "recordHashcode",
+            "columnName": "recordHashcode",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deleted",
+            "columnName": "deleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sync",
+            "columnName": "sync",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          },
+          {
+            "fieldPath": "record.source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "record.responsesJson",
+            "columnName": "responsesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "source"
+          ]
+        }
+      },
+      {
+        "tableName": "SendTextCannedResponsesSyncEntity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recordId` TEXT NOT NULL, `transport` TEXT NOT NULL, `watchSynchHashcode` INTEGER NOT NULL, PRIMARY KEY(`recordId`, `transport`), FOREIGN KEY(`recordId`) REFERENCES `SendTextCannedResponsesEntity`(`source`) ON UPDATE CASCADE ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "recordId",
+            "columnName": "recordId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "watchSynchHashcode",
+            "columnName": "watchSynchHashcode",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "recordId",
+            "transport"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "SendTextCannedResponsesEntity",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "recordId"
+            ],
+            "referencedColumns": [
+              "source"
+            ]
+          }
+        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '63a1c6f76588bded46b9dea33dc82a76')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '16e96da70b3738f0b51beae655878599')"
     ]
   }
 }

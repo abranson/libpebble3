@@ -145,6 +145,7 @@ class DevConnectionCloudpebbleProxy(
                                         installFirmware(identifier, payload, { send(PhoneAppLogMessage(it)) }, { send(InstallStatusMessage(it)) })
                                     }
                                     // Handle other message types as needed
+                                    ClientMessageType.PhoneInfo -> send(PhoneInfoMessage())
                                     ClientMessageType.TimelinePin -> {
                                         logger.d { "Received TimelinePin message with payload size ${payload.size}" }
                                         val message = "Mobile app currently doesn't support operation."

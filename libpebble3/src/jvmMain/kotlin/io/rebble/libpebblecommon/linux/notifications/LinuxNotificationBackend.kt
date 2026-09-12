@@ -25,6 +25,7 @@ data class LinuxNotification(
     val content: MappedNotification,
     val hasDefaultAction: Boolean = false,
     val hasReplyAction: Boolean = false,
+    val image: LinuxNotificationImage? = null,
 )
 
 sealed interface LinuxNotificationEvent {

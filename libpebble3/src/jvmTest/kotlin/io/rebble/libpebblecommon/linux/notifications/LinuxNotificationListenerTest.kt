@@ -27,6 +27,37 @@ import kotlin.uuid.Uuid
 
 class LinuxNotificationListenerTest {
     @Test
+    fun imagesAffectReplacementAndRespectGlobalPreference() = runTest {
+        for (enabled in listOf(true, false)) {
+            val dir = java.nio.file.Files.createTempDirectory("notification-listener-images")
+            try {
+                val done = CompletableDeferred<Unit>()
+                val source = posted("1").notification
+                val image = kotlin.test.assertNotNull(LinuxNotificationImage.decode(byteArrayOf(1, 0, 1, 0, -1, 0, 0)))
+                val store = LinuxNotificationImageStore(dir)
+                val listener = LinuxNotificationListener(
+                    LibPebbleCoroutineScope(backgroundScope.coroutineContext), notificationAppDao(), timelineDao(),
+                    backend(done) {
+                        emit(LinuxNotificationEvent.Posted(source))
+                        emit(LinuxNotificationEvent.Posted(source.copy(id = "2", replacesId = "1", image = image)))
+                        emit(LinuxNotificationEvent.Posted(source.copy(id = "3", replacesId = "2", image = image)))
+                    },
+                    NotificationConfig(sendNotificationImages = enabled).asFlow(), LinuxDeviceActivity { false }, store,
+                )
+                val pebble = RecordingLibPebble()
+                listener.init(pebble)
+                done.await()
+                assertEquals(2, pebble.sent.size)
+                assertEquals(listOf(pebble.sent.first().itemId), pebble.read)
+                val sent = pebble.sent.last()
+                assertEquals(enabled, sent.content.attributes.any { it.attribute == io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute.ImageAspectRatio })
+                assertEquals(enabled, store.image(sent.itemId, 20, 10) != null)
+                assertEquals("3", listener.activeNotification(sent.itemId)?.notificationId)
+            } finally { dir.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test
     fun startupRetiresUnreadPinsAndResetRetiresLivePin() = runTest {
         val unread = notification()
         val read = notification().let { notification ->
