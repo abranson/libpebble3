@@ -12,7 +12,7 @@ import io.rebble.libpebblecommon.database.entity.TimelineNotification
 import io.rebble.libpebblecommon.database.entity.TimelinePin
 import io.rebble.libpebblecommon.database.entity.TimelineReminder
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
-import io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute
+import io.rebble.libpebblecommon.messaging.SendTextManager
 import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
 import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
 import io.rebble.libpebblecommon.plugin.PluginCaller
@@ -50,8 +50,7 @@ class TimelineActionManager(
     private val actionOverrides: ActionOverrides,
     private val pinDao: TimelinePinRealDao,
     private val reminderDao: TimelineReminderRealDao,
-    private val pluginRegistry: PluginRegistry,
-    private val pluginClient: PluginClient,
+    private val sendTextManager: SendTextManager,
 ) {
     companion object {
         private val logger = Logger.withTag(TimelineActionManager::class.simpleName!!)
@@ -160,10 +159,13 @@ class TimelineActionManager(
         val itemId = invocation.itemId
         val actionId = invocation.actionId
         val result = try {
-            // Per-item overrides take precedence over the default pin/notification dispatch
-            // so callers can swap in custom behavior without touching the DB-backed model.
-            actionOverrides.actionHandlerOverrides[itemId]?.get(actionId)?.invoke(invocation.attributes)
-                ?: run {
+            if (sendTextManager.handles(itemId)) {
+                sendTextManager.invoke(actionId, invocation.attributes)
+            } else {
+                // Per-item overrides take precedence over the default pin/notification dispatch
+                // so callers can swap in custom behavior without touching the DB-backed model.
+                actionOverrides.actionHandlerOverrides[itemId]?.get(actionId)
+                    ?.invoke(invocation.attributes) ?: run {
                     val pin = pinDao.getEntry(itemId)
                     val reminder = if (pin == null) reminderDao.getEntry(itemId) else null
                     if (pin != null) {
@@ -180,6 +182,7 @@ class TimelineActionManager(
                         }
                     }
                 }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

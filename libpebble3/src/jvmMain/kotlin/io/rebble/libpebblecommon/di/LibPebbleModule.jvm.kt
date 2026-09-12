@@ -16,6 +16,8 @@ import io.rebble.libpebblecommon.connection.bt.classic.transport.LinuxRfcommSock
 import io.rebble.libpebblecommon.connection.bt.classic.transport.UnavailableLinuxRfcommSocketFactory
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNotificationActionHandler
 import io.rebble.libpebblecommon.contacts.SystemContacts
+import io.rebble.libpebblecommon.messaging.SystemMessaging
+import io.rebble.libpebblecommon.messaging.UnavailableSystemMessaging
 import io.rebble.libpebblecommon.linux.music.LinuxSystemMusicControl
 import io.rebble.libpebblecommon.linux.InactiveLinuxDeviceActivity
 import io.rebble.libpebblecommon.linux.LinuxDeviceActivity
@@ -33,6 +35,9 @@ import io.rebble.libpebblecommon.notification.NotificationAppsSync
 import io.rebble.libpebblecommon.notification.NotificationListenerConnection
 import io.rebble.libpebblecommon.packets.PhoneAppVersion
 import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
+import io.rebble.libpebblecommon.plugin.PhoneBatteryMonitor
+import io.rebble.libpebblecommon.plugin.PhoneNetworkMonitor
+import io.rebble.libpebblecommon.plugin.PlatformPlugins
 import io.rebble.libpebblecommon.util.SystemGeolocation
 import org.koin.core.module.Module
 import org.koin.core.module.dsl.singleOf
@@ -53,6 +58,7 @@ actual val platformModule: Module = module {
         PhoneCapabilities(
             CommonPhoneCapabilities + setOf(
                 ProtocolCapsFlag.SupportsExtendedMusicProtocol,
+                ProtocolCapsFlag.SupportsSendTextApp,
                 ProtocolCapsFlag.SupportsTwoWayDismissal,
             )
         )
@@ -94,6 +100,7 @@ actual val platformModule: Module = module {
     // geolocation all use distro-specific services.
     singleOf(::JvmSystemCalendar) bind SystemCalendar::class
     singleOf(::JvmSystemContacts) bind SystemContacts::class
+    singleOf(::UnavailableSystemMessaging) bind SystemMessaging::class
     singleOf(::JvmLegacyPhoneReceiver) bind LegacyPhoneReceiver::class
     singleOf(::JvmSystemGeolocation) bind SystemGeolocation::class
 
@@ -102,6 +109,9 @@ actual val platformModule: Module = module {
     singleOf(::JvmPlatformCalendarActionHandler) bind PlatformCalendarActionHandler::class
     singleOf(::JvmSystemCallLog) bind SystemCallLog::class
     singleOf(::JvmOtherPebbleApps) bind OtherPebbleApps::class
+    singleOf(::PhoneBatteryMonitor)
+    singleOf(::PhoneNetworkMonitor)
+    single { PlatformPlugins(emptySet()) }
 
     // BlueZ provides Classic discovery; direct RFCOMM is supplied through the factory below.
     singleOf(::JvmClassicScanner) bind ClassicScanner::class

@@ -19,6 +19,8 @@ import io.rebble.libpebblecommon.connection.endpointmanager.timeline.AndroidNoti
 import io.rebble.libpebblecommon.connection.NotificationReplies
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNotificationActionHandler
 import io.rebble.libpebblecommon.contacts.SystemContacts
+import io.rebble.libpebblecommon.messaging.SystemMessaging
+import io.rebble.libpebblecommon.messaging.UnavailableSystemMessaging
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.calls.AndroidPhoneReceiver
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.calls.AndroidSystemCallLog
 import io.rebble.libpebblecommon.connection.bt.classic.transport.AndroidClassicScanner
@@ -84,6 +86,7 @@ actual val platformModule: Module = module {
     singleOf(::AndroidPackageChangedReceiver)
     singleOf(::OtherPebbleAndroidApps) bind OtherPebbleApps::class
     singleOf(::AndroidSystemContacts) bind SystemContacts::class
+    singleOf(::UnavailableSystemMessaging) bind SystemMessaging::class
     singleOf(::AndroidPhoneReceiver) bind LegacyPhoneReceiver::class
     singleOf(::NotificationCallDetector)
     singleOf(::PhoneBatteryMonitor)

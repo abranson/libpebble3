@@ -24,7 +24,7 @@ import io.rebble.libpebblecommon.database.dao.LockerEntryRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationDao
 import io.rebble.libpebblecommon.database.dao.NotificationRuleDao
-import io.rebble.libpebblecommon.database.dao.PluginActionLogDao
+import io.rebble.libpebblecommon.database.dao.SendTextContactRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.dao.TimelinePinRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineReminderRealDao
@@ -51,6 +51,11 @@ import io.rebble.libpebblecommon.database.entity.NotificationAppItemEntity
 import io.rebble.libpebblecommon.database.entity.NotificationAppItemSyncEntity
 import io.rebble.libpebblecommon.database.entity.NotificationEntity
 import io.rebble.libpebblecommon.database.entity.NotificationRuleEntity
+import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesDao
+import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesEntity
+import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesSyncEntity
+import io.rebble.libpebblecommon.database.entity.SendTextContactEntity
+import io.rebble.libpebblecommon.database.entity.SendTextContactSyncEntity
 import io.rebble.libpebblecommon.database.entity.OverlayDataEntity
 import io.rebble.libpebblecommon.database.entity.PluginActionLogEntity
 import io.rebble.libpebblecommon.database.entity.TimelineNotificationEntity
@@ -100,10 +105,12 @@ internal const val DATABASE_FILENAME = "libpebble3.db"
         AppPrefsEntryEntity::class,
         AppPrefsEntrySyncEntity::class,
         NotificationRuleEntity::class,
-        AppDataUsageEntity::class,
-        PluginActionLogEntity::class,
+        SendTextContactEntity::class,
+        SendTextContactSyncEntity::class,
+        SendTextCannedResponsesEntity::class,
+        SendTextCannedResponsesSyncEntity::class,
     ],
-    version = 54,
+    version = 46,
     autoMigrations = [
         AutoMigration(from = 10, to = 11),
         AutoMigration(from = 11, to = 12),
@@ -141,14 +148,6 @@ internal const val DATABASE_FILENAME = "libpebble3.db"
         AutoMigration(from = 43, to = 44),
         AutoMigration(from = 44, to = 45),
         AutoMigration(from = 45, to = 46),
-        AutoMigration(from = 46, to = 47),
-        AutoMigration(from = 47, to = 48, spec = AutoMigration48::class),
-        AutoMigration(from = 48, to = 49),
-        AutoMigration(from = 49, to = 50),
-        AutoMigration(from = 50, to = 51, spec = AutoMigration51::class),
-        AutoMigration(from = 51, to = 52),
-        AutoMigration(from = 52, to = 53),
-        AutoMigration(from = 53, to = 54, spec = AutoMigration54::class),
     ],
     exportSchema = true,
 )
@@ -173,8 +172,8 @@ abstract class Database : RoomDatabase() {
     abstract fun weatherAppDao(): WeatherAppRealDao
     abstract fun appPrefsDao(): AppPrefsEntryDao
     abstract fun notificationRuleDao(): NotificationRuleDao
-    abstract fun appDataUsageDao(): AppDataUsageDao
-    abstract fun pluginActionLogDao(): PluginActionLogDao
+    abstract fun sendTextContactDao(): SendTextContactRealDao
+    abstract fun sendTextCannedResponsesDao(): SendTextCannedResponsesDao
 }
 
 @DeleteTable(tableName = "WatchSettingsEntity")

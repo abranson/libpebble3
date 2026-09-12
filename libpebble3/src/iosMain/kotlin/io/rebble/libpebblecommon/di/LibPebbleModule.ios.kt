@@ -18,6 +18,8 @@ import io.rebble.libpebblecommon.connection.endpointmanager.timeline.IosNotifica
 import io.rebble.libpebblecommon.connection.NotificationReplies
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNotificationActionHandler
 import io.rebble.libpebblecommon.contacts.SystemContacts
+import io.rebble.libpebblecommon.messaging.SystemMessaging
+import io.rebble.libpebblecommon.messaging.UnavailableSystemMessaging
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.calls.IosLegacyPhoneReceiver
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.calls.IosSystemCallLog
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.contacts.IosSystemContacts
@@ -67,6 +69,7 @@ actual val platformModule: Module = module {
     singleOf(::IosSystemGeolocation) bind SystemGeolocation::class
     singleOf(::OtherPebbleIosApps) bind OtherPebbleApps::class
     singleOf(::IosSystemContacts) bind SystemContacts::class
+    singleOf(::UnavailableSystemMessaging) bind SystemMessaging::class
     singleOf(::IosLegacyPhoneReceiver) bind LegacyPhoneReceiver::class
     singleOf(::PhoneBatteryMonitor)
     singleOf(::PhoneSoundPlayer)

@@ -122,6 +122,7 @@ import io.rebble.libpebblecommon.health.Health
 import io.rebble.libpebblecommon.js.HttpInterceptorManager
 import io.rebble.libpebblecommon.js.InjectedPKJSHttpInterceptors
 import io.rebble.libpebblecommon.js.JsTokenUtil
+import io.rebble.libpebblecommon.messaging.SendTextManager
 import io.rebble.libpebblecommon.js.RemoteTimelineEmulator
 import io.rebble.libpebblecommon.imaging.ImagingService
 import io.rebble.libpebblecommon.locker.AppFileReader
@@ -412,6 +413,8 @@ fun initKoin(
                 single { get<Database>().watchPrefDao() }
                 single { get<Database>().weatherAppDao() }
                 single { get<Database>().appPrefsDao() }
+                single { get<Database>().sendTextContactDao() }
+                single { get<Database>().sendTextCannedResponsesDao() }
                 singleOf(::LegacyBtClassicMigrator)
                 singleOf(::RespectDoNotDisturbMigrator)
                 singleOf(::WatchManager) binds arrayOf(WatchConnector::class, Watches::class)
@@ -555,6 +558,7 @@ fun initKoin(
                 singleOf(::ErrorTracker)
                 singleOf(::RealConnectionFailureHandler) bind ConnectionFailureHandler::class
                 singleOf(::PhoneContactsSyncer)
+                singleOf(::SendTextManager)
                 singleOf(::ContactsApi) bind Contacts::class
                 singleOf(::RealLibPebbleAnalytics) binds arrayOf(
                     LibPebbleAnalytics::class,

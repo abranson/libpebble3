@@ -15,6 +15,7 @@ import io.rebble.libpebblecommon.database.dao.BlobDbRecord
 import io.rebble.libpebblecommon.database.dao.LockerEntryRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationRuleDao
+import io.rebble.libpebblecommon.database.dao.SendTextContactRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.dao.TimelinePinRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineReminderRealDao
@@ -23,6 +24,7 @@ import io.rebble.libpebblecommon.database.dao.VibePatternDao
 import io.rebble.libpebblecommon.database.dao.WatchPrefRealDao
 import io.rebble.libpebblecommon.database.dao.WeatherAppRealDao
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntryDao
+import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesDao
 import io.rebble.libpebblecommon.database.entity.DbTimelineItem
 import io.rebble.libpebblecommon.database.entity.TimelineNotificationEntity
 import io.rebble.libpebblecommon.database.dao.HealthSettingsEntryRealDao
@@ -77,6 +79,8 @@ data class BlobDbDaos(
     private val weatherAppDao: WeatherAppRealDao,
     private val appPrefsEntryDao: AppPrefsEntryDao,
     private val notificationRuleDao: NotificationRuleDao,
+    private val sendTextContactDao: SendTextContactRealDao,
+    private val sendTextCannedResponsesDao: SendTextCannedResponsesDao,
 ) {
     fun get(): Set<BlobDbDao<BlobDbRecord>> = buildSet {
         add(lockerEntryDao)
@@ -91,6 +95,8 @@ data class BlobDbDaos(
         add(watchPrefDao)
         add(weatherAppDao)
         add(appPrefsEntryDao)
+        add(sendTextContactDao)
+        add(sendTextCannedResponsesDao)
         // because typing
     } as Set<BlobDbDao<BlobDbRecord>>
     

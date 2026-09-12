@@ -38,6 +38,7 @@ data class AppPrefsEntry(
     override fun value(params: ValueParams): UByteArray? {
         return when (id) {
             KEY_WEATHER_APP -> WeatherPrefsValue.fromString(value)?.asBytes()
+            SEND_TEXT_APP_CONFIG_KEY -> SendTextPrefsValue.decode(value)?.asBytes()
             else -> null
         }
     }
@@ -53,6 +54,15 @@ suspend fun AppPrefsEntryDao.setWeatherSettings(weatherPrefs: WeatherPrefsValue)
         AppPrefsEntry(
             id = KEY_WEATHER_APP,
             value = weatherPrefs.encodeToString(),
+        )
+    )
+}
+
+suspend fun AppPrefsEntryDao.setSendTextSettings(sendTextPrefs: SendTextPrefsValue) {
+    insertOrReplace(
+        AppPrefsEntry(
+            id = SEND_TEXT_APP_CONFIG_KEY,
+            value = sendTextPrefs.encode(),
         )
     )
 }
