@@ -22,8 +22,8 @@ internal data class NotificationAppearance(
  * meant to be exhaustive.
  *
  * [NotificationProperties] is keyed on *Android* package names, so it only matches notifications
- * bridged out of an Android compatibility layer. Native apps fall through to
- * the freedesktop theme icon and category hints.
+ * bridged out of an Android compatibility layer. Platform backends can supply a default icon
+ * before falling through to the freedesktop theme icon and category hints.
  */
 internal fun appearanceFor(
     app: NotificationAppItem,
@@ -33,6 +33,7 @@ internal fun appearanceFor(
     return NotificationAppearance(
         icon = TimelineIcon.fromCode(app.iconCode)
             ?: props?.icon
+            ?: n.defaultIcon
             ?: iconForThemeName(n.iconName)
             ?: iconForCategory(n.category),
         colorArgb = TimelineColor.findByName(app.colorName)?.argbColor()
