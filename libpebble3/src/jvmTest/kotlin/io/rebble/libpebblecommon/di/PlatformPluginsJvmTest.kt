@@ -24,6 +24,16 @@ class PlatformPluginsJvmTest {
     }
 
     @Test
+    fun advertisesImageFetchSoFirmwareRequestsNotificationImages() {
+        val app = koinApplication { modules(platformModule) }
+        try {
+            assertTrue(ProtocolCapsFlag.SupportsImageFetch in app.koin.get<PhoneCapabilities>().capabilities)
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
     fun phoneStatePluginResolvesWithJvmPlatformBindings() = runTest {
         val app = koinApplication {
             modules(platformModule, module { singleOf(::PhoneStatePlugin) })

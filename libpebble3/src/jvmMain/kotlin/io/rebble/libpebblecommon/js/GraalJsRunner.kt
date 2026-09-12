@@ -44,6 +44,7 @@ class GraalJsRunner(
     private val remoteTimelineEmulator: RemoteTimelineEmulator,
     private val httpInterceptorManager: HttpInterceptorManager,
     private val notificationConfigFlow: NotificationConfigFlow,
+    private val pluginRegistry: io.rebble.libpebblecommon.plugin.PluginRegistry,
 ) : JsRunner(appInfo, lockerEntry, jsPath, device, urlOpenRequests) {
     private val logger = Logger.withTag("GraalJsRunner-${appInfo.longName}")
 
@@ -77,13 +78,13 @@ class GraalJsRunner(
 
         val interfacesScope = scope + threadContext
         val instances = listOf(
-            XMLHTTPRequestManager(interfacesScope, ::evalAsync, httpInterceptorManager, appInfo),
+            JvmXMLHTTPRequestManager(interfacesScope, ::evalAsync, httpInterceptorManager, appInfo),
             JsTimeout(interfacesScope, ::evalAsync),
             WebSocketManager(interfacesScope, ::evalAsync),
             JvmPKJSInterface(this, device, libPebble, jsTokenUtil),
             JvmPrivatePKJSInterface(
                 this, device, interfacesScope, _outgoingAppMessages, logMessages, jsTokenUtil,
-                remoteTimelineEmulator, httpInterceptorManager, notificationConfigFlow,
+                remoteTimelineEmulator, httpInterceptorManager, notificationConfigFlow, pluginRegistry,
             ),
             JvmLocalStorageInterface(appInfo.uuid, appContext),
             JvmGeolocationInterface(interfacesScope, this),
@@ -194,6 +195,10 @@ class GraalJsRunner(
 
     override suspend fun signalReady() {
         withContext(threadContext) { evalNow("globalThis.signalReady()") }
+    }
+
+    override suspend fun signalConfigMessage(requestId: Int, json: String) {
+        withContext(threadContext) { evalNow("globalThis.signalConfigMessageEvent($requestId, $json)") }
     }
 
     override suspend fun signalShowConfiguration() {

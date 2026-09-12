@@ -29,7 +29,7 @@ class DevConnectionTransportJvmTest {
         val payload = "unique developer bundle".encodeToByteArray()
         var observedPath: java.nio.file.Path? = null
         val libPebble = object : LibPebble by FakeLibPebble() {
-            override suspend fun sideloadApp(pbwPath: Path): Boolean {
+            override suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean): Boolean {
                 val file = Paths.get(pbwPath.toString())
                 observedPath = file
                 assertContentEquals(payload, Files.readAllBytes(file))

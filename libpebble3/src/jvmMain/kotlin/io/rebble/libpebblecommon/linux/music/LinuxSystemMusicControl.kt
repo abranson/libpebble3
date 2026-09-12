@@ -21,6 +21,13 @@ class LinuxSystemMusicControl(
     private val mpris: MprisController,
     private val volume: VolumeControl,
 ) : SystemMusicControl {
+    // Linux has no album-art source yet; preserve its existing music behavior.
+    override val supportsAlbumArt = false
+    override val albumArtUpdated = kotlinx.coroutines.flow.emptyFlow<Unit>()
+    override suspend fun getAlbumArt(
+        title: String, artist: String, width: Int, height: Int,
+    ): io.rebble.libpebblecommon.imaging.EncodedImage? = null
+
 
     init {
         mpris.start()

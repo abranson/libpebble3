@@ -52,13 +52,15 @@ internal class JvmPrivatePKJSInterface(
     remoteTimelineEmulator: RemoteTimelineEmulator,
     httpInterceptorManager: HttpInterceptorManager,
     notificationConfigFlow: NotificationConfigFlow,
+    pluginRegistry: io.rebble.libpebblecommon.plugin.PluginRegistry,
 ) : PrivatePKJSInterface(
     jsRunner, device, scope, outgoingAppMessages, logMessages, jsTokenUtil,
-    remoteTimelineEmulator, httpInterceptorManager, notificationConfigFlow,
+    remoteTimelineEmulator, httpInterceptorManager, notificationConfigFlow, pluginRegistry,
 ), JvmJsInterface {
     private val logger = Logger.withTag("JvmPrivatePKJSInterface")
     override val name = "_Pebble"
     override val methods = setOf(
+        "subscribeToSource", "unsubscribeSource", "invokeAction", "configMessageReply", "sendConfigMessage", "enumeratePlugins",
         "sendAppMessageString", "privateLog", "onConsoleLog", "onError",
         "onUnhandledRejection", "logInterceptedSend", "getVersionCode",
         "getTimelineTokenAsync", "privateFnConfirmReadySignal", "getActivePebbleWatchInfo",
@@ -68,6 +70,13 @@ internal class JvmPrivatePKJSInterface(
     override fun getVersionCode(): Int = 0
 
     override fun dispatch(method: String, args: List<Any?>): Any? = when (method) {
+        "subscribeToSource" -> subscribeToSource((args[0] as Number).toInt(), args[1].toString())
+        "unsubscribeSource" -> unsubscribeSource((args[0] as Number).toInt())
+        "invokeAction" -> invokeAction((args[0] as Number).toInt(), args[1].toString())
+        "configMessageReply" -> configMessageReply((args[0] as Number).toInt(), args[1].toString())
+        "sendConfigMessage" -> sendConfigMessage(args[0].toString())
+        "enumeratePlugins" -> enumeratePlugins()
+
         "sendAppMessageString" -> sendAppMessageString(args[0].toString())
         "privateLog" -> privateLog(args[0].toString())
         "onConsoleLog" -> {

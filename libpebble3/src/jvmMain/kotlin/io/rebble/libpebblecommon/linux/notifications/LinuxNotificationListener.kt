@@ -38,6 +38,7 @@ data class ActiveNotification(
     val title: String,
     val body: String,
     val actions: List<WatchAction>,
+    val image: LinuxNotificationImage? = null,
 )
 
 internal class ActiveNotificationTracker(
@@ -115,6 +116,7 @@ class LinuxNotificationListener(
     private val backend: LinuxNotificationBackend,
     private val notificationConfig: NotificationConfigFlow,
     private val deviceActivity: LinuxDeviceActivity,
+    private val imageStore: LinuxNotificationImageStore = LinuxNotificationImageStore(),
 ) : NotificationListenerConnection {
     private val logger = Logger.withTag("LinuxNotificationListener")
 
@@ -183,7 +185,7 @@ class LinuxNotificationListener(
         if (replaced != null && replaced.packageName == mapped.packageName &&
             replaced.title == mapped.title && replaced.body == mapped.body &&
             (WatchAction.Open in replaced.actions) == n.hasDefaultAction &&
-            (WatchAction.Reply in replaced.actions) == n.hasReplyAction
+            (WatchAction.Reply in replaced.actions) == n.hasReplyAction && replaced.image == n.image
         ) {
             // Same content re-posted (e.g. progress/hint update): nothing new for the watch.
             tracker.remap(replaced.itemId, replaced.notificationId, n.id)
@@ -197,11 +199,15 @@ class LinuxNotificationListener(
         }
         val appearance = appearanceFor(app, mapped)
 
+        val itemId = Uuid.random()
+        val imageAspect = n.image?.takeIf { app.sendImages && notificationConfig.value.sendNotificationImages }
+            ?.takeIf { imageStore.put(itemId, it) }?.aspect
         val watchActions = mutableListOf<WatchAction>()
         val notification = buildTimelineNotification(
             parentId = ANDROID_NOTIFICATIONS_UUID,
             timestamp = n.timestamp ?: Clock.System.now(),
         ) {
+            itemID = itemId
             layout = TimelineItem.Layout.GenericNotification
             attributes {
                 // Sender and message only, as on Android. No appName (attr 30) — the firmware's
@@ -211,6 +217,7 @@ class LinuxNotificationListener(
                 title { mapped.title.take(64) }
                 if (mapped.body.isNotEmpty()) body { mapped.body.take(512) }
                 tinyIcon { appearance.icon }
+                imageAspect?.let { uByte(io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute.ImageAspectRatio) { it } }
                 appearance.colorArgb?.let { backgroundColor { it.toPebbleColor() } }
             }
             actions {
@@ -262,6 +269,7 @@ class LinuxNotificationListener(
             title = mapped.title,
             body = mapped.body,
             actions = actions,
+            image = n.image,
         )
         tracker.track(active)
     }

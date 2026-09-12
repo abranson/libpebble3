@@ -433,6 +433,7 @@ fun initKoin(
                         get(),
                         get(),
                         get(),
+                        sendTextManager = get(),
                     )
                 } bind LibPebble::class
                 single { RealConnectionScopeFactory(koin) } bind ConnectionScopeFactory::class
@@ -469,6 +470,7 @@ fun initKoin(
                         timelineReminderDao = get(),
                         watchConfig = get(),
                         timelineWindowProvider = get(),
+                        vibePatternDao = get(),
                     )
                 }
                 singleOf(::MissedCallSyncer)

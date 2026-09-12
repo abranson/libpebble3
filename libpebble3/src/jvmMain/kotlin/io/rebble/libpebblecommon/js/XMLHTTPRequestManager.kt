@@ -1,3 +1,5 @@
+@file:JvmName("JvmXMLHTTPRequestManagerKt")
+
 package io.rebble.libpebblecommon.js
 
 import co.touchlab.kermit.Logger
@@ -33,7 +35,7 @@ private const val HEADERS = 2
 private const val LOADING = 3
 private const val DONE = 4
 
-internal class XMLHTTPRequestManager(
+internal class JvmXMLHTTPRequestManager(
     private val scope: CoroutineScope,
     private val eval: (String) -> Unit,
     private val httpInterceptorManager: HttpInterceptorManager,
@@ -42,7 +44,7 @@ internal class XMLHTTPRequestManager(
     private var lastInstance = 0
     private val instances = mutableMapOf<Int, XHRInstance>()
     private val client = HttpClient(CIO)
-    private val logger = Logger.withTag("XMLHTTPRequestManager")
+    private val logger = Logger.withTag("JvmXMLHTTPRequestManager")
 
     override val name = "_XMLHTTPRequestManager"
     override val methods = setOf(
@@ -126,10 +128,10 @@ internal class XMLHTTPRequestManager(
 
         private fun changeReadyState(newState: Int) {
             eval("$jsInstance.readyState = $newState")
-            dispatchEvent(XHREvent.ReadyStateChange)
+            dispatchEvent(JvmXHREvent.ReadyStateChange)
         }
 
-        private fun dispatchEvent(event: XHREvent) {
+        private fun dispatchEvent(event: JvmXHREvent) {
             val evt = "{\"type\": \"${event.toJsName()}\"}"
             eval("$jsInstance._dispatchEvent(${Json.encodeToString(event.toJsName())}, ${Json.encodeToString(evt)})")
         }
@@ -153,13 +155,13 @@ internal class XMLHTTPRequestManager(
 
         private fun dispatchError() {
             changeReadyState(DONE)
-            dispatchEvent(XHREvent.Error)
+            dispatchEvent(JvmXHREvent.Error)
         }
 
         fun send(data: ByteArray?, responseType: String?) {
             suspend fun execute() {
                 if (async) {
-                    dispatchEvent(XHREvent.LoadStart)
+                    dispatchEvent(JvmXHREvent.LoadStart)
                 }
                 if (httpInterceptorManager.shouldIntercept(url!!)) {
                     val appUuid = Uuid.parse(appInfo.uuid)
@@ -171,8 +173,8 @@ internal class XMLHTTPRequestManager(
                         val body = Json.encodeToString(response.result)
                         eval("$jsInstance._onResponseComplete($responseHeaders, $status, $statusText, $body)")
                         changeReadyState(DONE)
-                        dispatchEvent(XHREvent.Load)
-                        dispatchEvent(XHREvent.LoadEnd)
+                        dispatchEvent(JvmXHREvent.Load)
+                        dispatchEvent(JvmXHREvent.LoadEnd)
                     }
                     return
                 }
@@ -194,7 +196,7 @@ internal class XMLHTTPRequestManager(
                     logger.e { "Request timed out: ${e.message}" }
                     scope.launch {
                         changeReadyState(DONE)
-                        dispatchEvent(XHREvent.Timeout)
+                        dispatchEvent(JvmXHREvent.Timeout)
                     }
                     return
                 } catch (e: Exception) {
@@ -241,8 +243,8 @@ internal class XMLHTTPRequestManager(
                 scope.launch {
                     eval("$jsInstance._onResponseComplete($responseHeaders, $status, $statusText, $body)")
                     changeReadyState(DONE)
-                    dispatchEvent(XHREvent.Load)
-                    dispatchEvent(XHREvent.LoadEnd)
+                    dispatchEvent(JvmXHREvent.Load)
+                    dispatchEvent(JvmXHREvent.LoadEnd)
                 }
             }
             if (async) {
@@ -260,7 +262,7 @@ internal class XMLHTTPRequestManager(
             requestJob?.cancel("Aborted by JS")
             requestJob = null
             changeReadyState(DONE)
-            dispatchEvent(XHREvent.Abort)
+            dispatchEvent(JvmXHREvent.Abort)
         }
     }
 
@@ -271,7 +273,7 @@ internal class XMLHTTPRequestManager(
     }
 }
 
-enum class XHREvent {
+enum class JvmXHREvent {
     Abort,
     Error,
     Load,
@@ -281,7 +283,7 @@ enum class XHREvent {
     ReadyStateChange,
     Timeout;
     companion object {
-        fun fromString(event: String): XHREvent? {
+        fun fromString(event: String): JvmXHREvent? {
             return entries.firstOrNull { it.name.equals(event, ignoreCase = true) }
         }
     }
@@ -292,7 +294,7 @@ enum class XHREvent {
 }
 
 @Serializable
-data class CompleteXHRResponse(
+data class JvmCompleteXHRResponse(
     val responseHeaders: Map<String, String>,
     val responseData: String,
     val status: Int,
