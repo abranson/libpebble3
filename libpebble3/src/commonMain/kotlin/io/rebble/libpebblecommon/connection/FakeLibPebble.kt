@@ -49,6 +49,7 @@ import io.rebble.libpebblecommon.metadata.WatchColor
 import io.rebble.libpebblecommon.metadata.WatchHardwarePlatform
 import io.rebble.libpebblecommon.metadata.WatchType
 import io.rebble.libpebblecommon.music.MusicAction
+import io.rebble.libpebblecommon.messaging.SendTextFavorite
 import io.rebble.libpebblecommon.music.PlaybackState
 import io.rebble.libpebblecommon.music.RepeatType
 import io.rebble.libpebblecommon.notification.NotificationDecision
@@ -86,6 +87,11 @@ import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 class FakeLibPebble : LibPebble {
+    override suspend fun replaceSendTextConfiguration(
+        favorites: List<SendTextFavorite>,
+        cannedResponses: List<String>,
+    ) {}
+
     override fun init() {
         // No-op
     }
