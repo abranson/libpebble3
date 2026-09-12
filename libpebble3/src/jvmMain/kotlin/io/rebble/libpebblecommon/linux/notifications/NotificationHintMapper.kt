@@ -1,5 +1,7 @@
 package io.rebble.libpebblecommon.linux.notifications
 
+import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
+
 /** A D-Bus method to invoke when the user picks an action ("service path interface method"). */
 data class RemoteAction(
     val service: String,
@@ -41,6 +43,8 @@ data class MappedNotification(
     val colorArgb: Int? = null,
     /** Action key -> method to invoke. Keys match [DBusNotification.actions]. */
     val remoteActions: Map<String, RemoteAction> = emptyMap(),
+    /** Platform icon default, below user overrides and Android package mappings. */
+    val defaultIcon: TimelineIcon? = null,
 )
 
 /**
