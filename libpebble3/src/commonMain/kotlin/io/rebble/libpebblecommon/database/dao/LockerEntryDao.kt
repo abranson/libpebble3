@@ -6,6 +6,8 @@ import androidx.room.RewriteQueriesToDropUnusedColumns
 import androidx.room.Transaction
 import io.rebble.libpebblecommon.database.entity.LockerEntry
 import io.rebble.libpebblecommon.database.entity.LockerEntryDao
+import io.rebble.libpebblecommon.database.entity.LockerEntryEntity
+import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.locker.AppType
 import kotlinx.coroutines.flow.Flow
 import kotlin.uuid.Uuid
@@ -81,27 +83,21 @@ interface LockerEntryRealDao : LockerEntryDao {
     """)
     suspend fun getAll(): List<LockerEntry>
 
-    @Query("""
-        SELECT * FROM LockerEntryEntity WHERE deleted = 0 AND id IN (:ids)
-    """)
-    fun getEntriesFlow(ids: List<Uuid>): Flow<List<LockerEntry>>
+    @Query("SELECT * FROM LockerEntryEntity WHERE id = :id AND deleted = 0")
+    suspend fun getStoredEntry(id: Uuid): LockerEntryEntity?
 
-    @Query("""
-        UPDATE LockerEntryEntity
-        SET watchPermissions = :permissions, recordHashcode = :hashcode
-        WHERE id = :id AND watchPermissions != :permissions
-    """)
-    suspend fun updateWatchPermissions(id: Uuid, permissions: Int, hashcode: Int)
-
-    /** Apps missing from [permissions] have none. */
     @Transaction
-    suspend fun syncWatchPermissions(permissions: Map<Uuid, Int>) {
-        getAll().forEach { entry ->
-            val bits = permissions[entry.id] ?: 0
-            if (entry.watchPermissions != bits) {
-                updateWatchPermissions(entry.id, bits, entry.copy(watchPermissions = bits).recordHashCode())
-            }
+    suspend fun associateStoreMetadata(metadata: StorePbwMetadata): Boolean {
+        val stored = getStoredEntry(metadata.uuid) ?: return false
+        val entry = stored.record
+        if (!entry.sideloaded || entry.systemApp || !entry.appstoreData?.storeId.isNullOrBlank()) {
+            return false
         }
+        val updated = metadata.applyTo(entry)
+        insertOrReplace(stored.copy(record = updated.copy(
+            appstoreData = updated.appstoreData?.copy(userToken = entry.appstoreData?.userToken),
+        )))
+        return true
     }
 
     @Transaction
