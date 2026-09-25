@@ -68,7 +68,6 @@ class PKJSApp(
 ): LibPebbleKoinComponent, CompanionApp, ConfigMessageTarget {
     companion object {
         private val logger = Logger.withTag(PKJSApp::class.simpleName!!)
-        private val CONFIGURATION_URL_TIMEOUT = 10.seconds
     }
     val uuid: Uuid by lazy { Uuid.parse(appInfo.uuid) }
     private var jsRunner: JsRunner? = null
@@ -175,6 +174,9 @@ class PKJSApp(
         try {
             return requestPKJSConfigurationUrl(configurationRequestMutex, urlOpenRequests) {
                 jsRunner.signalShowConfiguration()
+            } ?: run {
+                logger.e { "Timed out waiting for configuration URL" }
+                null
             }
         } catch (e: CancellationException) {
             throw e
@@ -254,18 +256,23 @@ internal suspend fun awaitPKJSConfigurationUrl(
  * There is one URL channel per session, so concurrent callers cannot independently drain it or
  * determine which showConfiguration callback produced a URL. Holding this mutex until the URL is
  * received makes each request own exactly one drain/signal/response sequence. [withLock] releases
- * it when a caller is cancelled.
+ * it when a caller is cancelled or the request times out. Bound the entire request, including
+ * waiting for the mutex, so an app that never opens a URL cannot leave callers waiting forever.
  */
 internal suspend fun requestPKJSConfigurationUrl(
     requestMutex: Mutex,
     urlOpenRequests: ReceiveChannel<String>,
     signalShowConfiguration: suspend () -> Unit,
-): String = requestMutex.withLock {
-    // Drop a URL that arrived before this request started, never one belonging to a concurrent
-    // request (which cannot run while this mutex is held).
-    while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
-    awaitPKJSConfigurationUrl(urlOpenRequests, signalShowConfiguration)
+): String? = withTimeoutOrNull(CONFIGURATION_URL_TIMEOUT) {
+    requestMutex.withLock {
+        // Drop a URL that arrived before this request started, never one belonging to a concurrent
+        // request (which cannot run while this mutex is held).
+        while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
+        awaitPKJSConfigurationUrl(urlOpenRequests, signalShowConfiguration)
+    }
 }
+
+private val CONFIGURATION_URL_TIMEOUT = 10.seconds
 
 fun AppMessageDictionary.toJSData(appKeys: Map<String, Int>): String {
     val data = this.mapKeys {

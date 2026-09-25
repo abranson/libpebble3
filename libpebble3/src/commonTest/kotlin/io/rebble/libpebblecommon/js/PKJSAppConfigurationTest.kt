@@ -14,6 +14,34 @@ import kotlin.time.Duration.Companion.seconds
 
 class PKJSAppConfigurationTest {
     @Test
+    fun `missing configuration URL times out and does not consume the next URL`() = runTest {
+        val urls = Channel<String>()
+        val mutex = Mutex()
+
+        assertNull(requestPKJSConfigurationUrl(mutex, urls) {})
+        assertEquals(10.seconds.inWholeMilliseconds, testScheduler.currentTime)
+
+        val next = requestPKJSConfigurationUrl(mutex, urls) {
+            urls.send("https://example.test/config")
+        }
+        assertEquals("https://example.test/config", next)
+    }
+
+    @Test
+    fun `configuration request times out waiting for ownership without signalling`() = runTest {
+        val urls = Channel<String>(Channel.UNLIMITED)
+        val mutex = Mutex(locked = true)
+        urls.send("existing")
+        var signalled = false
+
+        assertNull(requestPKJSConfigurationUrl(mutex, urls) { signalled = true })
+        assertEquals(10.seconds.inWholeMilliseconds, testScheduler.currentTime)
+        assertEquals(false, signalled)
+        assertEquals("existing", urls.tryReceive().getOrNull())
+        mutex.unlock()
+    }
+
+    @Test
     fun `cancelled configuration request cannot consume the next URL`() = runTest {
         val urls = Channel<String>()
         val mutex = Mutex()
