@@ -1,5 +1,13 @@
 package io.rebble.libpebblecommon.linux.web
 
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import kotlin.test.assertNotNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -243,6 +251,125 @@ class RebbleWebServicesTest {
 
         assertFailsWith<CancellationException> { provider.getDevToken() }
     }
+
+    @Test
+    fun `locker fetch combines every page with the captured bearer`() = runTest {
+        val other = "22345678-1234-4abc-8def-1234567890ab"
+        withLockerServer(
+            pages = { path ->
+                200 to when (path) {
+                    "/locker" -> lockerPage(uuid.toString(), "/page2")
+                    "/page2" -> lockerPage(other, null)
+                    else -> error("unexpected path $path")
+                }
+            },
+        ) { services, requests ->
+            val snapshot = assertNotNull(services.fetchLocker())
+            assertEquals(listOf(uuid.toString(), other), snapshot.locker.applications.map { it.uuid })
+            assertNull(snapshot.locker.nextPageURL)
+            assertEquals(listOf("/locker", "/page2"), requests.map { it.first })
+            assertEquals(listOf("Bearer account-a", "Bearer account-a"), requests.map { it.second })
+        }
+    }
+
+    @Test
+    fun `query-only pagination keeps the locker endpoint path`() = runTest {
+        withLockerServer(
+            pages = { path ->
+                200 to lockerPage(uuid.toString(), if (path == "/locker") "?page=2" else null)
+            },
+        ) { services, requests ->
+            assertNotNull(services.fetchLocker())
+            assertEquals(listOf("/locker", "/locker?page=2"), requests.map { it.first })
+        }
+    }
+
+    @Test
+    fun `failed or malformed later page never returns a partial locker`() = runTest {
+        for (failure in listOf(503 to "unavailable", 200 to "not json")) {
+            withLockerServer(
+                pages = { path -> if (path == "/locker") 200 to lockerPage(uuid.toString(), "/page2") else failure },
+            ) { services, requests ->
+                assertNull(services.fetchLocker())
+                assertEquals(2, requests.size)
+            }
+        }
+    }
+
+    @Test
+    fun `cyclic and foreign pagination links fail without another request`() = runTest {
+        for (next in listOf("/locker", "http://localhost:1/steal-bearer")) {
+            withLockerServer(pages = { 200 to lockerPage(uuid.toString(), next) }) { services, requests ->
+                assertNull(services.fetchLocker())
+                assertEquals(1, requests.size)
+            }
+        }
+    }
+
+    @Test
+    fun `account switch on later page discards the whole locker`() = runTest {
+        var token = "account-a"
+        withLockerServer(
+            token = { token },
+            pages = { path ->
+                if (path == "/locker") 200 to lockerPage(uuid.toString(), "/page2") else {
+                    token = "account-b"
+                    200 to lockerPage(uuid.toString(), null)
+                }
+            },
+        ) { services, requests ->
+            assertNull(services.fetchLocker())
+            assertEquals(2, requests.size)
+            assertEquals("Bearer account-a", requests.last().second)
+        }
+    }
+
+    private suspend fun withLockerServer(
+        token: () -> String = { "account-a" },
+        pages: (String) -> Pair<Int, String>,
+        test: suspend (RebbleWebServices, List<Pair<String, String?>>) -> Unit,
+    ) {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String?>>())
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            val path = exchange.requestURI.toString()
+            requests += path to exchange.requestHeaders.getFirst("Authorization")
+            val (status, body) = pages(path)
+            val bytes = body.toByteArray()
+            exchange.sendResponseHeaders(status, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        val client = HttpClient(CIO)
+        try {
+            val provider = RebbleBootConfigProvider.forTest(
+                token = token, nowMillis = { 0L },
+                fetch = { bootConfig("http://127.0.0.1:${server.address.port}/locker") },
+            )
+            test(RebbleWebServices(token, provider, client), requests)
+        } finally {
+            client.close()
+            server.stop(0)
+        }
+    }
+
+    private fun lockerPage(id: String, next: String?): String = buildJsonObject {
+        val entry = Json.parseToJsonElement("""
+            {"id":"store-id","uuid":"$id","title":"Face","type":"watchface",
+             "category":"","hearts":0,"is_configurable":false,"is_timeline_enabled":true,
+             "links":{"remove":"","href":"","share":""},
+             "developer":{"id":"dev","name":"Developer","contact_email":""},
+             "hardware_platforms":[],"companions":{"android":null,"ios":null},
+             "compatibility":{"ios":{"supported":false},"android":{"supported":false},
+               "aplite":{"supported":false,"firmware":{"major":4}},
+               "basalt":{"supported":false,"firmware":{"major":4}},
+               "chalk":{"supported":false,"firmware":{"major":4}},
+               "diorite":{"supported":false,"firmware":{"major":4}},
+               "emery":{"supported":false,"firmware":{"major":4}}}}
+        """.trimIndent())
+        put("applications", JsonArray(listOf(entry)))
+        if (next != null) put("nextPageURL", next)
+    }.toString()
 
     private fun bootConfig(lockerEndpoint: String) = RebbleBootConfig(
         config = RebbleBootConfig.Config(
