@@ -8,6 +8,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
+import io.ktor.http.Url
 import io.rebble.libpebblecommon.connection.FirmwareUpdateCheckResult
 import io.rebble.libpebblecommon.connection.WebAccountSession
 import io.rebble.libpebblecommon.connection.WebServices
@@ -20,6 +21,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.util.concurrent.atomic.AtomicLong
+import java.net.URI
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
@@ -87,17 +89,38 @@ class RebbleWebServices private constructor(
             return null
         }
         return try {
-            val response = httpClient.get(url) { bearerAuth(bearer) }
-            if (!isCurrentAccountSession(session)) return null
-            if (!response.status.isSuccess()) {
-                logger.w { "locker fetch returned ${response.status}" }
-                return null
+            val origin = Url(url)
+            var pageUrl = url
+            val visited = mutableSetOf<String>()
+            val applications = mutableListOf<io.rebble.libpebblecommon.web.LockerEntry>()
+            while (true) {
+                // Never apply a partial listing, loop forever, or forward the bearer to a
+                // different origin supplied by a pagination link.
+                val page = Url(pageUrl)
+                require(page.protocol == origin.protocol && page.host == origin.host && page.port == origin.port)
+                require(visited.size < MAX_LOCKER_PAGES && visited.add(page.toString()))
+                if (!isCurrentAccountSession(session)) return null
+                val response = httpClient.get(page) { bearerAuth(bearer) }
+                if (!isCurrentAccountSession(session)) return null
+                if (!response.status.isSuccess()) {
+                    logger.w { "locker fetch returned ${response.status}" }
+                    return null
+                }
+                val model = json.decodeFromString<LockerModel>(response.bodyAsText())
+                if (!isCurrentAccountSession(session)) return null
+                applications += model.applications
+                val next = model.nextPageURL?.takeIf(String::isNotBlank) ?: break
+                pageUrl = if (next.startsWith("?")) {
+                    // URI.resolve drops the last path segment for a query-only reference.
+                    pageUrl.substringBefore('#').substringBefore('?') + next
+                } else {
+                    URI(pageUrl).resolve(next).toString()
+                }
             }
-            val body = response.bodyAsText()
-            if (!isCurrentAccountSession(session)) return null
-            val model = json.decodeFromString<LockerModel>(body)
-            if (!isCurrentAccountSession(session)) return null
-            LockerModelWrapper(locker = model, failedToFetchUuids = emptySet())
+            LockerModelWrapper(
+                locker = LockerModel(applications.distinctBy { it.uuid.lowercase() }),
+                failedToFetchUuids = emptySet(),
+            )
         } catch (e: Exception) {
             e.rethrowCancellation()
             logger.w(e) { "locker fetch failed: ${e.message}" }
@@ -293,6 +316,7 @@ class RebbleWebServices private constructor(
     private fun accountToken(): String? = token()?.takeIf(String::isNotBlank)
 
     companion object {
+        private const val MAX_LOCKER_PAGES = 1_000
         private const val COHORTS_URL = "https://cohorts.rebble.io"
         private const val PEBBLEOS_RELEASES_URL =
             "https://api.github.com/repos/coredevices/PebbleOS/releases"
