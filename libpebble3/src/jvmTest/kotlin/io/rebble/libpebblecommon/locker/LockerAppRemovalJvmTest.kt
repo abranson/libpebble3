@@ -137,6 +137,27 @@ class LockerAppRemovalJvmTest {
         }
     }
 
+    @Test
+    fun deletionRejectsSnapshotsCapturedBeforeAndDuringRemoteRemoval() = runTest {
+        withFixture {
+            val before = coordinator.capture(web::currentAccountSession)
+            var during: LockerRemoteAccountSession? = null
+            web.afterRemove = { during = coordinator.capture(web::currentAccountSession) }
+            assertTrue(removal.removeApp(app.id))
+
+            for (snapshot in listOf(before, checkNotNull(during))) {
+                val applied = coordinator.commitSnapshotIfCurrent(snapshot, web::isCurrentAccountSession) {
+                    database.lockerEntryDao().insertOrReplace(app.copy(sideloaded = false))
+                    true
+                }
+                assertFalse(applied, "a stale sync must not resurrect a removed app")
+                assertNull(database.lockerEntryDao().getEntry(app.id))
+            }
+            val fresh = coordinator.capture(web::currentAccountSession)
+            assertTrue(coordinator.commitSnapshotIfCurrent(fresh, web::isCurrentAccountSession) { true })
+        }
+    }
+
     private suspend fun withFixture(block: suspend Fixture.() -> Unit) {
         val directory = Files.createTempDirectory("locker-removal-test-")
         val database = Room.databaseBuilder<Database>(directory.resolve("locker.db").toString())
