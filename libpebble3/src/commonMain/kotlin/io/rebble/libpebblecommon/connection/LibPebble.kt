@@ -48,6 +48,7 @@ import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.locker.AppBasicProperties
 import io.rebble.libpebblecommon.locker.AppType
 import io.rebble.libpebblecommon.locker.Locker
+import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.locker.LockerWrapper
 import io.rebble.libpebblecommon.metadata.WatchHardwarePlatform
 import io.rebble.libpebblecommon.messaging.SendTextConfiguration
@@ -403,6 +404,14 @@ interface LockerApi {
      */
     /** [loadOnWatch] launches it once it has synced; leave it off for background installs. */
     suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean = true): Boolean
+    /** Import a store download with its identity and artwork, without requiring an account. */
+    suspend fun sideloadApp(
+        pbwPath: Path,
+        storeMetadata: StorePbwMetadata,
+        loadOnWatch: Boolean = true,
+    ): Boolean
+    /** Associate an unlinked sideloaded app without changing its binary, version or order. */
+    suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean
     fun getAllLockerBasicInfo(): Flow<List<AppBasicProperties>>
     fun getAllLockerUuids(): Flow<List<Uuid>>
     fun getLocker(type: AppType, searchQuery: String?, limit: Int): Flow<List<LockerWrapper>>

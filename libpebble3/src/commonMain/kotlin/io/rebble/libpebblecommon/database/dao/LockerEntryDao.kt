@@ -6,6 +6,8 @@ import androidx.room.RewriteQueriesToDropUnusedColumns
 import androidx.room.Transaction
 import io.rebble.libpebblecommon.database.entity.LockerEntry
 import io.rebble.libpebblecommon.database.entity.LockerEntryDao
+import io.rebble.libpebblecommon.database.entity.LockerEntryEntity
+import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.locker.AppType
 import kotlinx.coroutines.flow.Flow
 import kotlin.uuid.Uuid
@@ -65,6 +67,23 @@ interface LockerEntryRealDao : LockerEntryDao {
         SELECT * FROM LockerEntryEntity WHERE deleted = 0
     """)
     suspend fun getAll(): List<LockerEntry>
+
+    @Query("SELECT * FROM LockerEntryEntity WHERE id = :id AND deleted = 0")
+    suspend fun getStoredEntry(id: Uuid): LockerEntryEntity?
+
+    @Transaction
+    suspend fun associateStoreMetadata(metadata: StorePbwMetadata): Boolean {
+        val stored = getStoredEntry(metadata.uuid) ?: return false
+        val entry = stored.record
+        if (!entry.sideloaded || entry.systemApp || !entry.appstoreData?.storeId.isNullOrBlank()) {
+            return false
+        }
+        val updated = metadata.applyTo(entry)
+        insertOrReplace(stored.copy(record = updated.copy(
+            appstoreData = updated.appstoreData?.copy(userToken = entry.appstoreData?.userToken),
+        )))
+        return true
+    }
 
     @Transaction
     suspend fun insertOrReplaceAndOrder(entry: LockerEntry, syncLimit: Int) {

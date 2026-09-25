@@ -55,7 +55,11 @@ class PbwApp(private val path: Path) {
 fun PbwApp.bestVariantFor(watchType: WatchType): WatchType? =
     watchType.getCompatibleAppVariants().firstOrNull { getManifest(it) != null }
 
-fun PbwApp.toLockerEntry(now: Instant, orderIndex: Int): LockerEntry {
+fun PbwApp.toLockerEntry(
+    now: Instant,
+    orderIndex: Int,
+    storeMetadata: StorePbwMetadata? = null,
+): LockerEntry {
     val uuid = Uuid.parse(info.uuid)
     // Built from the variants actually in the pbw; appinfo targetPlatforms can be wrong (see [bestVariantFor])
     val platforms = WatchType.entries.mapNotNull { watchType ->
@@ -82,5 +86,5 @@ fun PbwApp.toLockerEntry(now: Instant, orderIndex: Int): LockerEntry {
         appstoreData = null,
         orderIndex = orderIndex,
         capabilities = info.capabilities,
-    )
+    ).let { entry -> storeMetadata?.applyTo(entry) ?: entry }
 }

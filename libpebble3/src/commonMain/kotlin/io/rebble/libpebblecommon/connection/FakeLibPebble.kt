@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.paging.PagingSource
 import io.ktor.util.PlatformUtils
 import io.rebble.libpebblecommon.LibPebbleConfig
+import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.calendar.NewCalendarEvent
 import io.rebble.libpebblecommon.calls.Call
 import io.rebble.libpebblecommon.connection.bt.BluetoothState
@@ -179,6 +180,14 @@ class FakeLibPebble : LibPebble {
         // No-op
         return true
     }
+
+    override suspend fun sideloadApp(
+        pbwPath: Path,
+        storeMetadata: StorePbwMetadata,
+        loadOnWatch: Boolean,
+    ): Boolean = sideloadApp(pbwPath, loadOnWatch)
+
+    override suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean = false
 
     override fun getAllLockerBasicInfo(): Flow<List<AppBasicProperties>> {
         return flow { emit(emptyList()) }

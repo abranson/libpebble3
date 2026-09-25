@@ -29,6 +29,7 @@ import io.rebble.libpebblecommon.database.entity.LockerEntryAppstoreData
 import io.rebble.libpebblecommon.database.entity.LockerEntryPlatform
 import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import io.rebble.libpebblecommon.disk.pbw.PbwApp
+import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.disk.pbw.toLockerEntry
 import io.rebble.libpebblecommon.metadata.WatchType
 import io.rebble.libpebblecommon.web.LockerModelWrapper
@@ -86,6 +87,10 @@ class Locker(
     private val timelinePinDao = database.timelinePinDao()
     private val timelineReminderDao = database.timelineReminderDao()
     private val accountMutations = LockerAccountMutationCoordinator()
+    private val appRemoval = LockerAppRemoval(
+        database, accountMutations, webServices, errorTracker, ::deleteCachedApp,
+        { webSyncManagerProvider.webSyncManager().requestLockerSync() },
+    )
 
     companion object {
         private val logger = Logger.withTag("Locker")
@@ -93,8 +98,26 @@ class Locker(
     }
 
     override suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean): Boolean =
+        importPbw(pbwPath, loadOnWatch, null)
+
+    override suspend fun sideloadApp(
+        pbwPath: Path,
+        storeMetadata: StorePbwMetadata,
+        loadOnWatch: Boolean,
+    ): Boolean = importPbw(pbwPath, loadOnWatch, storeMetadata)
+
+    override suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean =
+        accountMutations.mutate {
+            lockerEntryDao.associateStoreMetadata(storeMetadata)
+        }
+
+    private suspend fun importPbw(
+        pbwPath: Path,
+        loadOnWatch: Boolean,
+        storeMetadata: StorePbwMetadata?,
+    ): Boolean =
         try {
-            sideloadApp(pbwApp = PbwApp(pbwPath), loadOnWatch = loadOnWatch)
+            sideloadApp(PbwApp(pbwPath), loadOnWatch, storeMetadata)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -201,77 +224,7 @@ class Locker(
         }
     }
 
-    override suspend fun removeApp(id: Uuid): Boolean {
-        var removedSideloaded = false
-        val remoteSession = accountMutations.mutateWithSession(
-            webSession = webServices::currentAccountSession,
-        ) { capturedSession ->
-            val lockerEntry = lockerEntryDao.getEntry(id)
-            if (lockerEntry == null) {
-                logger.e { "removeApp: not found: $id" }
-                return@mutateWithSession null
-            }
-            if (lockerEntry.systemApp) {
-                logger.w { "removeApp: refusing to remove system app: $id" }
-                return@mutateWithSession null
-            }
-            logger.d { "Deleting app ${lockerEntry.id} (${lockerEntry.title})" }
-            if (lockerEntry.sideloaded) {
-                lockerEntryDao.markForDeletionWithTimeline(id, timelinePinDao, timelineReminderDao)
-                deleteCachedApp(id)
-                removedSideloaded = true
-                null
-            } else {
-                capturedSession
-            }
-        }
-        if (!removedSideloaded && remoteSession == null) return false
-
-        if (remoteSession != null) {
-            // Use the exact bearer captured with the local locker generation. A token switch may
-            // let the old request finish remotely, but it must never target the replacement
-            // account or commit into its local locker.
-            val removedRemotely = when (val webSession = remoteSession.webSession) {
-                null -> if (webServices.usesAccountSessions()) false else webServices.removeFromLocker(id)
-                else -> webServices.removeFromLocker(id, webSession)
-            }
-            if (!removedRemotely) {
-                logger.w { "Failed to remove from remote locker" }
-                errorTracker.reportError(UserFacingError.FailedToRemovePbwFromLocker("Failed to remove app from remote locker"))
-                return false
-            }
-            val committed = accountMutations.commitIfCurrent(
-                session = remoteSession,
-                isWebSessionCurrent = webServices::isCurrentAccountSession,
-            ) {
-                val current = lockerEntryDao.getEntry(id)
-                when {
-                    current == null -> true // A concurrent same-session remove already committed.
-                    current.systemApp || current.sideloaded -> false
-                    else -> {
-                        lockerEntryDao.markForDeletionWithTimeline(
-                            id,
-                            timelinePinDao,
-                            timelineReminderDao,
-                        )
-                        deleteCachedApp(id)
-                        true
-                    }
-                }
-            }
-            if (!committed) {
-                logger.w { "Account changed before remote locker removal could commit locally" }
-                return false
-            }
-        }
-
-        if (removedSideloaded) {
-            logger.d { "Requesting locker sync after removing sideloaded app" }
-            // If it was sideloaded, trigger a resync (in case the same app is in the locker).
-            webSyncManagerProvider.webSyncManager().requestLockerSync()
-        }
-        return true
-    }
+    override suspend fun removeApp(id: Uuid): Boolean = appRemoval.removeApp(id)
 
     private fun deleteCachedApp(id: Uuid) {
         // Keep the PBW and PKJS cache intact until remote and local deletion have committed. A
@@ -398,10 +351,14 @@ class Locker(
      * @param pbwApp The app to sideload.
      * @param loadOnWatch Whether to fully install the app on the watch (launch it). Defaults to true.
      */
-    suspend fun sideloadApp(pbwApp: PbwApp, loadOnWatch: Boolean): Boolean {
+    suspend fun sideloadApp(
+        pbwApp: PbwApp,
+        loadOnWatch: Boolean,
+        storeMetadata: StorePbwMetadata? = null,
+    ): Boolean {
         logger.d { "Sideloading app ${pbwApp.info.longName}" }
         val type = if (pbwApp.info.watchapp.watchface) AppType.Watchface else AppType.Watchapp
-        val lockerEntry = pbwApp.toLockerEntry(clock.now(), orderIndexForInsert(type))
+        val lockerEntry = pbwApp.toLockerEntry(clock.now(), orderIndexForInsert(type), storeMetadata)
         val tasks = if (loadOnWatch) {
             watchManager.watches.value.filterIsInstance<ConnectedPebbleDevice>().map {
                 libPebbleCoroutineScope.async {
