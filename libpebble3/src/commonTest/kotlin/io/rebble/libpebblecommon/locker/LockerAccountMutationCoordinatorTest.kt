@@ -14,6 +14,46 @@ class LockerAccountMutationCoordinatorTest {
     private data class TestSession(val value: String) : WebAccountSession
 
     @Test
+    fun snapshotMutationDoesNotRetireConcurrentSameAccountRemovals() = runTest {
+        val coordinator = LockerAccountMutationCoordinator()
+        val account = TestSession("account-a")
+        val firstRemove = coordinator.capture { account }
+        val secondRemove = coordinator.capture { account }
+        assertTrue(coordinator.commitIfCurrent(firstRemove, { true }) { true })
+        assertTrue(coordinator.commitIfCurrent(secondRemove, { true }) { true })
+        assertFalse(coordinator.commitSnapshotIfCurrent(firstRemove, { true }) { true })
+    }
+
+    @Test
+    fun snapshotQueuedBehindLocalMutationIsRejected() = runTest {
+        val coordinator = LockerAccountMutationCoordinator()
+        val session = coordinator.capture { TestSession("account-a") }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val mutation = async { coordinator.mutate { entered.complete(Unit); release.await() } }
+        entered.await()
+        var applied = false
+        val snapshot = async {
+            coordinator.commitSnapshotIfCurrent(session, { true }) { applied = true; true }
+        }
+        runCurrent()
+        assertFalse(snapshot.isCompleted)
+        release.complete(Unit)
+        mutation.await()
+        assertFalse(snapshot.await())
+        assertFalse(applied)
+    }
+
+    @Test
+    fun olderConcurrentSnapshotCannotOverwriteAppliedSnapshot() = runTest {
+        val coordinator = LockerAccountMutationCoordinator()
+        val old = coordinator.capture { TestSession("account-a") }
+        val recent = coordinator.capture { TestSession("account-a") }
+        assertTrue(coordinator.commitSnapshotIfCurrent(recent, { true }) { true })
+        assertFalse(coordinator.commitSnapshotIfCurrent(old, { true }) { true })
+    }
+
+    @Test
     fun staleSessionQueuedBehindTransitionIsRejected() = runTest {
         val coordinator = LockerAccountMutationCoordinator()
         val accountA = TestSession("account-a")

@@ -7,22 +7,30 @@ import kotlinx.coroutines.sync.withLock
 internal data class LockerRemoteAccountSession(
     val generation: Long,
     val webSession: WebAccountSession?,
+    val snapshotRevision: Long,
 )
 
 /** Serializes account transitions with the local commit boundary of remote locker operations. */
 internal class LockerAccountMutationCoordinator {
     private val mutex = Mutex()
     private var generation = 0L
+    private var snapshotRevision = 0L
 
     suspend fun capture(webSession: () -> WebAccountSession?): LockerRemoteAccountSession =
-        mutex.withLock { LockerRemoteAccountSession(generation, webSession()) }
+        mutex.withLock { LockerRemoteAccountSession(generation, webSession(), snapshotRevision) }
 
-    suspend fun <T> mutate(block: suspend () -> T): T = mutex.withLock { block() }
+    suspend fun <T> mutate(block: suspend () -> T): T = mutex.withLock {
+        snapshotRevision++
+        block()
+    }
 
     suspend fun <T> mutateWithSession(
         webSession: () -> WebAccountSession?,
         block: suspend (LockerRemoteAccountSession) -> T,
-    ): T = mutex.withLock { block(LockerRemoteAccountSession(generation, webSession())) }
+    ): T = mutex.withLock {
+        snapshotRevision++
+        block(LockerRemoteAccountSession(generation, webSession(), snapshotRevision))
+    }
 
     suspend fun <T> transition(block: suspend () -> T): T = mutex.withLock {
         // Advance even when the subsequent durable operation fails. An attempted account change
@@ -39,6 +47,22 @@ internal class LockerAccountMutationCoordinator {
         if (session.generation != generation) return@withLock false
         val webSession = session.webSession
         if (webSession != null && !isWebSessionCurrent(webSession)) return@withLock false
+        snapshotRevision++
+        block()
+    }
+
+    /** A fetched snapshot must not overwrite local mutations made while it was in flight. */
+    suspend fun commitSnapshotIfCurrent(
+        session: LockerRemoteAccountSession,
+        isWebSessionCurrent: (WebAccountSession) -> Boolean,
+        block: suspend () -> Boolean,
+    ): Boolean = mutex.withLock {
+        if (session.generation != generation || session.snapshotRevision != snapshotRevision) {
+            return@withLock false
+        }
+        val webSession = session.webSession
+        if (webSession != null && !isWebSessionCurrent(webSession)) return@withLock false
+        snapshotRevision++
         block()
     }
 
@@ -48,6 +72,7 @@ internal class LockerAccountMutationCoordinator {
         block: suspend () -> Unit,
     ): Boolean = mutex.withLock {
         if (!isWebSessionCurrent(session)) return@withLock false
+        snapshotRevision++
         block()
         true
     }

@@ -90,7 +90,7 @@ import kotlinx.serialization.json.Json
 class WebSyncManagerProvider(val webSyncManager: () -> WebSyncManager)
 
 internal class LockerAccountSessionChangedException :
-    CancellationException("account changed during locker operation")
+    CancellationException("account or locker changed during locker operation")
 
 class Locker(
     private val watchManager: WatchManager,
@@ -395,7 +395,7 @@ class Locker(
         session: LockerRemoteAccountSession,
     ) {
         logger.d("update: ${locker.locker.applications.size}")
-        val applied = accountMutations.commitIfCurrent(
+        val applied = accountMutations.commitSnapshotIfCurrent(
             session = session,
             isWebSessionCurrent = webServices::isCurrentAccountSession,
         ) {
