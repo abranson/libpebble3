@@ -245,42 +245,25 @@ class RebbleWebServices private constructor(
     }
 
     private suspend fun checkGithubReleases(watch: WatchInfo): FirmwareUpdateCheckResult {
-        val response = try {
-            httpClient.get("$PEBBLEOS_RELEASES_URL/latest")
+        val candidate = try {
+            fetchGithubFirmware(watch.platform.revision)
         } catch (e: Exception) {
             e.rethrowCancellation()
-            logger.w { "GitHub release request failed: ${e.message}" }
+            logger.w { "GitHub release check failed: ${e.message}" }
             return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
-        }
-        if (!response.status.isSuccess()) {
-            logger.w { "GitHub release request failed: ${response.status}" }
-            return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
-        }
-        val release = try {
-            json.decodeFromString<GithubRelease>(response.bodyAsText())
-        } catch (e: Exception) {
-            e.rethrowCancellation()
-            logger.w { "couldn't parse GitHub release: ${e.message}" }
-            return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
-        }
-        // The slot-less pbz carries manifests for both slots; FirmwareUpdater picks the one
-        // matching the watch's inactive slot.
-        val assetName = "normal_${watch.platform.revision}_${release.tagName}.pbz"
-        val asset = release.assets.firstOrNull { it.name == assetName } ?: run {
-            logger.w { "release ${release.tagName} has no $assetName" }
-            return FirmwareUpdateCheckResult.UpdateCheckFailed("No firmware found for ${watch.platform.revision}")
-        }
-        val latest = FirmwareVersion.from(
-            tag = release.tagName,
-            isRecovery = false,
-            gitHash = "",
-            timestamp = runCatching { Instant.parse(release.publishedAt) }
-                .getOrDefault(Instant.fromEpochSeconds(0)),
-            isDualSlot = false,
-            isSlot0 = false,
-        ) ?: return FirmwareUpdateCheckResult.UpdateCheckFailed("Couldn't parse firmware version")
-        return result(watch, latest, asset.url, release.body.orEmpty())
+        } ?: return FirmwareUpdateCheckResult.UpdateCheckFailed("No firmware found for ${watch.platform.revision}")
+        return result(watch, candidate.version, candidate.url, candidate.notes)
     }
+
+    private suspend fun fetchGithubFirmware(revision: String): FirmwareUpdateCheckResult.FoundUpdate? =
+        latestGithubFirmware(revision) { page ->
+            val response = httpClient.get(PEBBLEOS_RELEASES_URL) {
+                parameter("per_page", GITHUB_RELEASES_PAGE_SIZE)
+                parameter("page", page)
+            }
+            check(response.status.isSuccess()) { "GitHub release request failed: ${response.status}" }
+            response.bodyAsText()
+        }
 
     /**
      * Exercises the full HTTPS + JSON path (ktor CIO sockets, TLS, serialization) so the
@@ -288,9 +271,8 @@ class RebbleWebServices private constructor(
      * needs a connected watch, which the tracing container doesn't have.
      */
     suspend fun selfTest() {
-        val response = httpClient.get("$PEBBLEOS_RELEASES_URL/latest")
-        val release = json.decodeFromString<GithubRelease>(response.bodyAsText())
-        logger.i { "selfTest: ${response.status}, latest PebbleOS ${release.tagName}" }
+        val candidate = checkNotNull(fetchGithubFirmware("asterix"))
+        logger.i { "selfTest: latest PebbleOS ${candidate.version.stringVersion}" }
     }
 
     private fun result(
@@ -310,8 +292,6 @@ class RebbleWebServices private constructor(
             FirmwareUpdateCheckResult.FoundNoUpdate
         }
     }
-
-    private fun FirmwareVersion.numeric(): Int = patch + minor * 1_000 + major * 1_000_000
 
     private fun accountToken(): String? = token()?.takeIf(String::isNotBlank)
 
@@ -370,6 +350,8 @@ private data class GithubRelease(
     @SerialName("tag_name") val tagName: String,
     @SerialName("published_at") val publishedAt: String = "",
     val body: String? = null,
+    val draft: Boolean = false,
+    val prerelease: Boolean = false,
     val assets: List<GithubAsset> = emptyList(),
 )
 
@@ -378,3 +360,46 @@ private data class GithubAsset(
     val name: String,
     @SerialName("browser_download_url") val url: String,
 )
+
+private const val GITHUB_RELEASES_PAGE_SIZE = 100
+private const val MAX_GITHUB_RELEASE_PAGES = 10
+
+private fun FirmwareVersion.numeric(): Int = patch + minor * 1_000 + major * 1_000_000
+
+internal suspend fun latestGithubFirmware(
+    revision: String,
+    fetchPage: suspend (Int) -> String,
+): FirmwareUpdateCheckResult.FoundUpdate? {
+    val json = Json { ignoreUnknownKeys = true }
+    var latest: FirmwareUpdateCheckResult.FoundUpdate? = null
+    // GitHub does not order releases by firmware version: a maintenance
+    // release on an older branch can replace /latest. Inspect every page before
+    // returning a candidate, rather than treating a partial check as definitive.
+    for (page in 1..MAX_GITHUB_RELEASE_PAGES) {
+        val releases = json.decodeFromString<List<GithubRelease>>(fetchPage(page))
+        for (release in releases) {
+            if (release.draft || release.prerelease) continue
+            // The slot-less bundle contains both slots; the updater selects the inactive one.
+            val assetName = "normal_${revision}_${release.tagName}.pbz"
+            val asset = release.assets.firstOrNull { it.name == assetName } ?: continue
+            val version = FirmwareVersion.from(
+                tag = release.tagName,
+                isRecovery = false,
+                gitHash = "",
+                timestamp = runCatching { Instant.parse(release.publishedAt) }
+                    .getOrDefault(Instant.fromEpochSeconds(0)),
+                isDualSlot = false,
+                isSlot0 = false,
+            ) ?: continue
+            if (latest == null || version.numeric() > latest.version.numeric()) {
+                latest = FirmwareUpdateCheckResult.FoundUpdate(
+                    version = version,
+                    url = asset.url,
+                    notes = release.body.orEmpty(),
+                )
+            }
+        }
+        if (releases.size < GITHUB_RELEASES_PAGE_SIZE) return latest
+    }
+    error("GitHub release pagination limit exceeded")
+}
