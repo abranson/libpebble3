@@ -80,7 +80,10 @@ class ScreenshotService(
                                 throw IllegalStateException("Screenshot response code was ${header.responseCode}")
                             }
                             logger.v { "header: $header" }
-                            val bufferSize = (parsedHeader.height * parsedHeader.width * parsedHeader.version.bitsPerPixel) / 8
+                            val bufferSize = parsedHeader.dataSizeOrNull()
+                                ?: throw IllegalArgumentException(
+                                    "Unsafe screenshot dimensions: ${parsedHeader.width}x${parsedHeader.height}"
+                                )
                             expectedSize = bufferSize
                             data = DataBuffer(bufferSize)
                             handleBytes(headerPacket.data.get())
@@ -170,6 +173,22 @@ data class ParsedScreenshotHeader(
     val height: Int,
     val width: Int,
 )
+
+private const val MAX_SCREENSHOT_PIXELS = 1_048_576L
+
+/**
+ * Returns the exact wire-data size for a supported screenshot, or null when its
+ * attacker-controlled dimensions would be unsafe to allocate or decode.
+ */
+internal fun ParsedScreenshotHeader.dataSizeOrNull(): Int? {
+    if (width <= 0 || height <= 0) return null
+    if (version == ScreenshotVersion.BLACK_WHITE_1_BIT && width % 8 != 0) return null
+
+    val pixelCount = width.toLong() * height.toLong()
+    if (pixelCount > MAX_SCREENSHOT_PIXELS) return null
+
+    return (pixelCount * version.bitsPerPixel / 8).toInt()
+}
 
 enum class ScreenshotState {
     Idle,
