@@ -11,6 +11,7 @@ import io.rebble.libpebblecommon.plugin.ConfigMessageTarget
 import io.rebble.libpebblecommon.services.appmessage.AppMessageData
 import io.rebble.libpebblecommon.services.appmessage.AppMessageDictionary
 import io.rebble.libpebblecommon.services.appmessage.AppMessageResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emptyFlow
@@ -28,6 +30,8 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.files.Path
 import kotlinx.serialization.json.Json
@@ -64,10 +68,10 @@ class PKJSApp(
 ): LibPebbleKoinComponent, CompanionApp, ConfigMessageTarget {
     companion object {
         private val logger = Logger.withTag(PKJSApp::class.simpleName!!)
-        private val CONFIGURATION_URL_TIMEOUT = 10.seconds
     }
     val uuid: Uuid by lazy { Uuid.parse(appInfo.uuid) }
     private var jsRunner: JsRunner? = null
+    private val configurationRequestMutex = Mutex()
     private var runningScope: CoroutineScope? = null
     // Buffered so JS-side `loadUrl(...).trySend(url)` can't silently drop the URL when the
     // receiver in requestConfigurationUrl() hasn't yet reached `receive()`.
@@ -167,20 +171,17 @@ class PKJSApp(
                 return null
             }
         }
-        // Drop any stale URL that the JS may have queued spontaneously before this call.
-        while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
-        val url = runningScope!!.async { urlOpenRequests.receive() }
-        try {
-            jsRunner.signalShowConfiguration()
+        val received = try {
+            requestPKJSConfigurationUrl(configurationRequestMutex, urlOpenRequests) {
+                jsRunner.signalShowConfiguration()
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            url.cancel()
             logger.e(e) { "Error signalling show configuration" }
             return null
         }
-        // Apps can declare "configurable" and never call Pebble.openURL(), so this must be bounded.
-        val received = withTimeoutOrNull(CONFIGURATION_URL_TIMEOUT) { url.await() }
         if (received == null) {
-            url.cancel()
             logger.e { "Timed out waiting for configuration URL" }
             return null
         }
@@ -230,6 +231,50 @@ class PKJSApp(
         }
     }
 }
+
+/**
+ * Wait for the URL emitted by one showConfiguration callback.
+ *
+ * The receiver deliberately belongs to this request's coroutine, rather than the long-lived
+ * companion-app scope.  A caller may time out or cancel a request; leaving that receiver in the
+ * session scope would let it steal the URL from the next settings request.
+ */
+internal suspend fun awaitPKJSConfigurationUrl(
+    urlOpenRequests: ReceiveChannel<String>,
+    signalShowConfiguration: suspend () -> Unit,
+): String = coroutineScope {
+    val url = async { urlOpenRequests.receive() }
+    try {
+        signalShowConfiguration()
+        url.await()
+    } finally {
+        url.cancel()
+    }
+}
+
+/**
+ * Serialize the complete configuration request lifecycle for one PKJS session.
+ *
+ * There is one URL channel per session, so concurrent callers cannot independently drain it or
+ * determine which showConfiguration callback produced a URL. Holding this mutex until the URL is
+ * received makes each request own exactly one drain/signal/response sequence. [withLock] releases
+ * it when a caller is cancelled or the request times out. Bound the entire request, including
+ * waiting for the mutex, so an app that never opens a URL cannot leave callers waiting forever.
+ */
+internal suspend fun requestPKJSConfigurationUrl(
+    requestMutex: Mutex,
+    urlOpenRequests: ReceiveChannel<String>,
+    signalShowConfiguration: suspend () -> Unit,
+): String? = withTimeoutOrNull(CONFIGURATION_URL_TIMEOUT) {
+    requestMutex.withLock {
+        // Drop a URL that arrived before this request started, never one belonging to a concurrent
+        // request (which cannot run while this mutex is held).
+        while (urlOpenRequests.tryReceive().isSuccess) { /* discard */ }
+        awaitPKJSConfigurationUrl(urlOpenRequests, signalShowConfiguration)
+    }
+}
+
+private val CONFIGURATION_URL_TIMEOUT = 10.seconds
 
 fun AppMessageDictionary.toJSData(appKeys: Map<String, Int>): String {
     val data = this.mapKeys {
