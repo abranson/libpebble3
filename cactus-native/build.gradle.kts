@@ -14,9 +14,13 @@ android {
             abiFilters += "arm64-v8a"
         }
     }
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
+    // JVM consumers configure this module through the composite build but do not
+    // use its Android binaries. Let them avoid provisioning an unused NDK.
+    if (providers.gradleProperty("enableAndroidNativeBuild").orNull != "false") {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+            }
         }
     }
     compileOptions {
