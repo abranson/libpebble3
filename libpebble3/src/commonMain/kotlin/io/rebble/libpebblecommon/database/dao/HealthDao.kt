@@ -56,6 +56,9 @@ interface HealthDao {
     @Query("SELECT * FROM health_data WHERE timestamp = :timestamp")
     suspend fun getDataAtTimestamp(timestamp: Long): HealthDataEntity?
 
+    @Query("SELECT * FROM health_data WHERE timestamp <= :beforeTimestamp AND spo2Percent BETWEEN 1 AND 100 AND spo2Quality BETWEEN 5 AND 7 ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatestSpo2Reading(beforeTimestamp: Long): HealthDataEntity?
+
     @Query("SELECT * FROM health_data WHERE heartRate > 0 ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLatestHeartRateReading(): HealthDataEntity?
 

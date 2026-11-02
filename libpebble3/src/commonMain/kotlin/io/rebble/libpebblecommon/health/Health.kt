@@ -224,6 +224,9 @@ class Health(
     override suspend fun getDailySleepSession(dayStartEpochSec: Long): DailySleep? =
         fetchAndGroupDailySleep(healthDao, dayStartEpochSec, TimeZone.currentSystemDefault())
 
+    override suspend fun getLatestSpo2Reading(beforeTimestamp: Long): HealthDataEntity? =
+        healthDao.getLatestSpo2Reading(beforeTimestamp)
+
     override suspend fun getLatestHeartRateReading(): LatestHeartRate? {
         val entry = healthDao.getLatestHeartRateReading() ?: return null
         return LatestHeartRate(bpm = entry.heartRate, timestampEpochSec = entry.timestamp)
@@ -472,6 +475,9 @@ data class HealthSettings(
     val hrZone1Threshold: Short,
     val hrZone2Threshold: Short,
     val hrZone3Threshold: Short,
+    // Null means no preference received or explicitly chosen; do not write a default to the watch.
+    val bloodOxygenEnabled: Boolean? = null,
+    val spo2MeasurementInterval: HRMonitoringInterval? = null,
 )
 
 /** Result of atomically initializing a previously empty health-settings store. */

@@ -2,21 +2,23 @@ package io.rebble.libpebblecommon.database.dao
 
 import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.database.entity.HealthDataEntity
+import io.rebble.libpebblecommon.database.entity.hasUsableSpo2
 import io.rebble.libpebblecommon.database.entity.OverlayDataEntity
 
 private val logger = Logger.withTag("HealthDaoExt")
 
 /**
  * Inserts health data with priority based on step count. If data already exists for a timestamp,
- * only replaces it if the new data has more steps.
+ * keeps the movement record with more steps while merging SpO2 independently.
  */
 suspend fun HealthDao.insertHealthDataWithPriority(data: List<HealthDataEntity>) {
     var inserted = 0
     var skipped = 0
     var replaced = 0
 
-    data.forEach { newData ->
-        val existing = getDataAtTimestamp(newData.timestamp)
+    data.forEach { incoming ->
+        val existing = getDataAtTimestamp(incoming.timestamp)
+        val newData = if (existing == null) incoming else mergeHealthData(existing, incoming)
         if (existing == null) {
             insertHealthData(listOf(newData))
             inserted++
@@ -26,7 +28,10 @@ suspend fun HealthDao.insertHealthDataWithPriority(data: List<HealthDataEntity>)
             }
             insertHealthData(listOf(newData))
             replaced++
-        } else if (newData.steps < existing.steps) {
+        } else if (newData != existing) {
+            insertHealthData(listOf(newData))
+            replaced++
+        } else if (incoming.steps < existing.steps) {
             logger.d {
                 "Skipping data at timestamp ${newData.timestamp}: existing ${existing.steps} steps > new ${newData.steps} steps"
             }
@@ -42,7 +47,7 @@ suspend fun HealthDao.insertHealthDataWithPriority(data: List<HealthDataEntity>)
     val summary = buildString {
         append("Health data insert complete: ")
         if (inserted > 0) append("$inserted new, ")
-        if (replaced > 0) append("$replaced replaced (higher steps), ")
+        if (replaced > 0) append("$replaced replaced (higher steps or SpO2), ")
         if (skipped > 0) append("$skipped skipped (lower/equal steps)")
     }
     logger.d { summary }
@@ -89,4 +94,18 @@ suspend fun HealthDao.insertOverlayDataWithDeduplication(data: List<OverlayDataE
         if (skipped > 0) append("$skipped skipped (shorter/equal duration)")
     }
     logger.d { summary }
+}
+
+internal fun mergeHealthData(existing: HealthDataEntity, incoming: HealthDataEntity): HealthDataEntity {
+    val movement = if (incoming.steps > existing.steps) incoming else existing
+    // Never erase a stored measurement with an empty extension or a poorer repeat.
+    // Retain raw nonzero values even when they are unsuitable for display.
+    val oxygen = when {
+        incoming.hasUsableSpo2() && !existing.hasUsableSpo2() -> incoming
+        existing.hasUsableSpo2() && !incoming.hasUsableSpo2() -> existing
+        existing.spo2Percent == 0 && incoming.spo2Percent != 0 -> incoming
+        incoming.spo2Percent != 0 && incoming.spo2Quality > existing.spo2Quality -> incoming
+        else -> existing
+    }
+    return movement.copy(spo2Percent = oxygen.spo2Percent, spo2Quality = oxygen.spo2Quality)
 }

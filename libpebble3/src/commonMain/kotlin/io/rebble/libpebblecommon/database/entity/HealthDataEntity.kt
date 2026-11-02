@@ -1,5 +1,6 @@
 package io.rebble.libpebblecommon.database.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -17,7 +18,11 @@ data class HealthDataEntity(
     val distanceCm: Int,
     val heartRate: Int = 0,
     val heartRateZone: Int = 0,
-    val heartRateWeight: Int = 0
+    val heartRateWeight: Int = 0,
+    @ColumnInfo(defaultValue = "0")
+    val spo2Percent: Int = 0,
+    @ColumnInfo(defaultValue = "0")
+    val spo2Quality: Int = 0
 )
 
 @Entity(
@@ -34,3 +39,6 @@ data class OverlayDataEntity(
     val distanceCm: Int,
     val offsetUTC: Int
 )
+
+/** Firmware HeartRateQuality: 5=acceptable, 6=good, 7=excellent. Keep other raw values stored. */
+fun HealthDataEntity.hasUsableSpo2(): Boolean = spo2Percent in 1..100 && spo2Quality in 5..7

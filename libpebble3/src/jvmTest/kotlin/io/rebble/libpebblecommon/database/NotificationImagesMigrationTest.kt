@@ -35,7 +35,7 @@ class NotificationImagesMigrationTest {
             connection.execSQL("PRAGMA user_version = 42")
         }
         val database = Room.databaseBuilder<Database>(name = path)
-            .addMigrations(MIGRATION_42_46)
+            .addMigrations(MIGRATION_42_46, MIGRATION_46_47)
             .setDriver(driver).setQueryCoroutineContext(Dispatchers.IO).build()
         try {
             assertEquals("preserved", database.appPrefsDao().getEntry("migration-sentinel")?.value)

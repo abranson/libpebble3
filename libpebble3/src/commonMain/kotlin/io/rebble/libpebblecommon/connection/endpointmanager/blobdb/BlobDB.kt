@@ -449,7 +449,9 @@ class BlobDB(
             "activityPreferences",
             "unitsDistance",
             "hrmPreferences",
-            "heartRatePreferences" -> BlobDatabase.HealthParams
+            "heartRatePreferences",
+            "bloodOxygenPreferences",
+            "spo2Preferences" -> BlobDatabase.HealthParams
             else -> message.database
         }
     }

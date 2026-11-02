@@ -106,7 +106,7 @@ internal const val DATABASE_FILENAME = "libpebble3.db"
         SendTextCannedResponsesEntity::class,
         SendTextCannedResponsesSyncEntity::class,
     ],
-    version = 46,
+    version = 47,
     autoMigrations = [
         AutoMigration(from = 10, to = 11),
         AutoMigration(from = 11, to = 12),
@@ -191,7 +191,7 @@ val MIGRATION_39_40 = object : Migration(39, 40) {
 
 fun getRoomDatabase(ctx: AppContext): Database {
     return getDatabaseBuilder(ctx)
-        .addMigrations(MIGRATION_39_40, MIGRATION_42_46)
+        .addMigrations(MIGRATION_39_40, MIGRATION_42_46, MIGRATION_46_47)
         .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
         // V7 required a full re-create.
         .fallbackToDestructiveMigrationFrom(dropAllTables = true, 1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -233,5 +233,13 @@ val MIGRATION_42_46 = object : Migration(42, 46) {
             found
         }
         if (!present) connection.execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $type")
+    }
+}
+
+// Additive migration: existing minute records retain all activity and heart-rate values.
+val MIGRATION_46_47 = object : Migration(46, 47) {
+    override fun migrate(connection: SQLiteConnection) {
+        connection.execSQL("ALTER TABLE health_data ADD COLUMN spo2Percent INTEGER NOT NULL DEFAULT 0")
+        connection.execSQL("ALTER TABLE health_data ADD COLUMN spo2Quality INTEGER NOT NULL DEFAULT 0")
     }
 }

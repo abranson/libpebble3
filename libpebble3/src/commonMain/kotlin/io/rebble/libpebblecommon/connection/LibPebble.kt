@@ -181,6 +181,9 @@ interface HealthDataApi {
      *  @param dayStartEpochSec start-of-day in epoch seconds (midnight local time) */
     suspend fun getDailySleepSession(dayStartEpochSec: Long): DailySleep?
 
+    /** Latest acceptable-or-better SpO2 reading at or before the supplied epoch second. */
+    suspend fun getLatestSpo2Reading(beforeTimestamp: Long): HealthDataEntity?
+
     /** Returns the most recent non-zero heart rate reading, or null if none exists. */
     suspend fun getLatestHeartRateReading(): LatestHeartRate?
 

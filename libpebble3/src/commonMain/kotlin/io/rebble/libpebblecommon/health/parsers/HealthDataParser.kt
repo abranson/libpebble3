@@ -18,14 +18,15 @@ private val logger = Logger.withTag("HealthDataParser")
  * - Firmware 4.0 (version 7) - adds heart rate data
  * - Firmware 4.1 (version 8) - adds heart rate weight
  * - Firmware 4.3 (version 13) - adds heart rate zone
+ * - Version 14 - adds SpO2 percent and quality; later versions may append more fields
  *
  * @param payload Raw byte array from the watch
  * @param itemSize Size of each data item in bytes
  * @return List of parsed health data entities ready for database insertion
  */
 fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity> {
-    if (payload.isEmpty() || itemSize.toInt() == 0) {
-        logger.w { "Cannot parse steps data: empty payload or zero item size" }
+    if (payload.isEmpty() || itemSize.toInt() < 9) {
+        logger.w { "Cannot parse steps data: empty payload or incomplete item header" }
         return emptyList()
     }
 
@@ -47,10 +48,11 @@ fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity>
         val version = buffer.getUShort()
         val timestamp = buffer.getUInt()
         buffer.getByte() // unused
-        buffer.getUByte() // recordLength
+        val sampleSize = buffer.getUByte().toInt()
         val recordNum = buffer.getUByte()
 
-        if (!SUPPORTED_STEP_VERSIONS.contains(version)) {
+        val isNewerVersion = version > VERSION_FW_4_3 && sampleSize >= VERSION_FW_4_3_SAMPLE_SIZE
+        if (!SUPPORTED_STEP_VERSIONS.contains(version) && !isNewerVersion) {
             logger.w {
                 "Unsupported health steps record version=$version, skipping packet $i of $packetCount"
             }
@@ -62,9 +64,18 @@ fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity>
         }
 
         var currentTimestamp = timestamp
+        val minimumSampleSize = when {
+            version >= VERSION_FW_4_3 -> VERSION_FW_4_3_SAMPLE_SIZE
+            version >= VERSION_FW_4_1 -> 15
+            version >= VERSION_FW_4_0 -> 13
+            version >= VERSION_FW_3_11 -> 12
+            else -> 6
+        }
 
         for (j in 0 until recordNum.toInt()) {
-            if (buffer.remaining < 5) { // minimum bytes per record: steps(1)+orientation(1)+intensity(2)+lightIntensity(1)
+            val sampleStart = buffer.readPosition
+            val itemRemaining = itemStart + itemSize.toInt() - sampleStart
+            if (itemRemaining < maxOf(sampleSize, minimumSampleSize)) {
                 logger.w { "Buffer exhausted during steps parsing at record $j/$recordNum in packet $i" }
                 break
             }
@@ -104,6 +115,15 @@ fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity>
                 heartRateZone = buffer.getUByte().toInt()
             }
 
+            // A truncated extension must never consume the following minute's fields.
+            val hasSpo2 = version >= 14u && sampleSize >= 18
+            val spo2Percent = if (hasSpo2) buffer.getUByte().toInt() else 0
+            val spo2Quality = if (hasSpo2) buffer.getUByte().toInt() else 0
+
+            // Preserve the known prefix of future append-only formats.
+            val unread = sampleSize - (buffer.readPosition - sampleStart)
+            if (unread > 0) buffer.getBytes(unread)
+
             records.add(
                 HealthDataEntity(
                     timestamp = currentTimestamp.toLong(),
@@ -117,7 +137,9 @@ fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity>
                     distanceCm = distanceCm,
                     heartRate = heartRate,
                     heartRateZone = heartRateZone,
-                    heartRateWeight = heartRateWeight
+                    heartRateWeight = heartRateWeight,
+                    spo2Percent = spo2Percent,
+                    spo2Quality = spo2Quality
                 )
             )
 
@@ -245,6 +267,7 @@ private val VERSION_FW_3_11: UShort = 6u
 private val VERSION_FW_4_0: UShort = 7u
 private val VERSION_FW_4_1: UShort = 8u
 private val VERSION_FW_4_3: UShort = 13u
+private const val VERSION_FW_4_3_SAMPLE_SIZE = 16
 private val SUPPORTED_STEP_VERSIONS = setOf(
     VERSION_FW_3_10_AND_BELOW,
     VERSION_FW_3_11,

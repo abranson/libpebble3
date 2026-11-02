@@ -70,6 +70,10 @@ data class HealthSettingsEntry(
             KEY_HRM_PREFERENCES -> HrmPreferencesValue.fromString(value)?.asBytes(params.firmwareVersion)
             KEY_UNITS_DISTANCE -> UnitsDistanceValue.fromString(value)?.asBytes()
             KEY_HEART_RATE_PREFERENCES -> HeartRatePreferencesValue.fromString(value)?.asBytes()
+            KEY_BLOOD_OXYGEN_PREFERENCES, KEY_SPO2_PREFERENCES ->
+                if (params.firmwareVersion >= FW_BLOOD_OXYGEN_SETTINGS) {
+                    oxygenPreferenceBytes(id, value)
+                } else null
             else -> null
         }
     }
@@ -83,6 +87,10 @@ private const val KEY_ACTIVITY_PREFERENCES = "activityPreferences"
 private const val KEY_HRM_PREFERENCES = "hrmPreferences"
 private const val KEY_UNITS_DISTANCE = "unitsDistance"
 private const val KEY_HEART_RATE_PREFERENCES = "heartRatePreferences"
+internal const val KEY_BLOOD_OXYGEN_PREFERENCES = "bloodOxygenPreferences"
+internal const val KEY_SPO2_PREFERENCES = "spo2Preferences"
+// These preference layouts are verified against v4.41.2; do not send to legacy firmware.
+private val FW_BLOOD_OXYGEN_SETTINGS = fwSentinel(4, 41, 2)
 private val json = Json { ignoreUnknownKeys = true }
 
 // ActivityHRMSettings struct grew in firmware:
@@ -117,12 +125,20 @@ fun HealthSettingsEntryDao.getWatchSettings(): Flow<HealthSettings> {
     val heartRatePrefsFlow = getEntryFlow(KEY_HEART_RATE_PREFERENCES).map {
         HeartRatePreferencesValue.fromString(it?.value) ?: HeartRatePreferencesValue()
     }
+    val oxygenPrefsFlow = combine(
+        getEntryFlow(KEY_BLOOD_OXYGEN_PREFERENCES),
+        getEntryFlow(KEY_SPO2_PREFERENCES),
+    ) { enabled, interval ->
+        enabled?.value?.let { json.decodeFromString<Boolean>(it) } to
+            interval?.value?.let { HRMonitoringInterval.fromInt(json.decodeFromString<Byte>(it)) }
+    }
     return combine(
         activityPrefsFlow,
         unitPrefsFlow,
         hrmPrefsFlow,
         heartRatePrefsFlow,
-    ) { activityPrefs, unitPrefs, hrmPrefs, heartRatePrefs ->
+        oxygenPrefsFlow,
+    ) { activityPrefs, unitPrefs, hrmPrefs, heartRatePrefs, oxygenPrefs ->
         HealthSettings(
             heightMm = activityPrefs.heightMm,
             weightDag = activityPrefs.weightDag,
@@ -141,6 +157,8 @@ fun HealthSettingsEntryDao.getWatchSettings(): Flow<HealthSettings> {
             hrZone1Threshold = heartRatePrefs.zone1Threshold,
             hrZone2Threshold = heartRatePrefs.zone2Threshold,
             hrZone3Threshold = heartRatePrefs.zone3Threshold,
+            bloodOxygenEnabled = oxygenPrefs.first,
+            spo2MeasurementInterval = oxygenPrefs.second,
         )
     }
 }
@@ -174,6 +192,19 @@ internal fun defaultHealthSettings(): HealthSettings {
 
 suspend fun HealthSettingsEntryDao.setWatchSettings(healthSettings: HealthSettings) {
     val now = Clock.System.now().asMillisecond()
+    // Only explicitly known oxygen preferences are persisted, independently of legacy settings.
+    healthSettings.bloodOxygenEnabled?.let {
+        val encoded = json.encodeToString(it)
+        if (getEntry(KEY_BLOOD_OXYGEN_PREFERENCES)?.value != encoded) {
+            insertOrReplace(HealthSettingsEntry(KEY_BLOOD_OXYGEN_PREFERENCES, encoded, now))
+        }
+    }
+    healthSettings.spo2MeasurementInterval?.let {
+        val encoded = json.encodeToString(it.value)
+        if (getEntry(KEY_SPO2_PREFERENCES)?.value != encoded) {
+            insertOrReplace(HealthSettingsEntry(KEY_SPO2_PREFERENCES, encoded, now))
+        }
+    }
     insertOrReplace(
         HealthSettingsEntry(
             id = KEY_ACTIVITY_PREFERENCES,
@@ -398,4 +429,22 @@ suspend fun HealthSettingsEntryDao.setImperialUnits(imperialUnits: Boolean) {
             timestamp = Clock.System.now().asMillisecond(),
         )
     )
+}
+
+internal fun oxygenPreferenceBytes(key: String, value: String): UByteArray = when (key) {
+    KEY_BLOOD_OXYGEN_PREFERENCES -> ubyteArrayOf(if (json.decodeFromString<Boolean>(value)) 1u else 0u)
+    KEY_SPO2_PREFERENCES -> ubyteArrayOf(HRMonitoringInterval.fromInt(json.decodeFromString<Byte>(value)).value.toUByte())
+    else -> error("Unknown oxygen preference")
+}
+
+internal fun decodeOxygenPreference(key: String, value: UByteArray): String {
+    require(value.size == 1) { "Oxygen preference must contain exactly one byte" }
+    return when (key) {
+        KEY_BLOOD_OXYGEN_PREFERENCES -> {
+            require(value[0] <= 1u) { "Invalid oxygen enabled flag" }
+            json.encodeToString(value[0] == 1.toUByte())
+        }
+        KEY_SPO2_PREFERENCES -> json.encodeToString(HRMonitoringInterval.fromInt(value[0].toByte()).value)
+        else -> error("Unknown oxygen preference")
+    }
 }
