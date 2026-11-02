@@ -1,5 +1,21 @@
 package io.rebble.libpebblecommon.database.dao
 
+import coredev.BlobDatabase
+import io.rebble.libpebblecommon.LibPebbleConfig
+import io.rebble.libpebblecommon.LibPebbleConfigFlow
+import io.rebble.libpebblecommon.database.entity.KEY_BLOOD_OXYGEN_PREFERENCES
+import io.rebble.libpebblecommon.database.entity.KEY_SPO2_PREFERENCES
+import io.rebble.libpebblecommon.database.entity.decodeOxygenPreference
+import io.rebble.libpebblecommon.database.entity.oxygenPreferenceBytes
+import io.rebble.libpebblecommon.metadata.WatchType
+import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
+import io.rebble.libpebblecommon.packets.blobdb.BlobResponse
+import io.rebble.libpebblecommon.services.FirmwareVersion
+import io.rebble.libpebblecommon.services.blobdb.DbWrite
+import io.rebble.libpebblecommon.services.blobdb.WriteType
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlin.time.Instant
+import kotlin.test.assertContentEquals
 import androidx.room.Room
 import androidx.room.execSQL
 import androidx.room.useWriterConnection
@@ -24,6 +40,58 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class HealthSettingsInitializationJvmTest {
+    @Test
+    fun oxygenSettingsRoundTripWithoutOverwritingUnrelatedSettings() = runTest {
+        withHealthSettingsDao { dao ->
+            val original = healthSettings()
+            dao.setWatchSettingsTransactionally(original)
+            assertNull(dao.getEntry(KEY_BLOOD_OXYGEN_PREFERENCES))
+            assertNull(dao.getEntry(KEY_SPO2_PREFERENCES))
+            val selected = original.copy(bloodOxygenEnabled = true,
+                spo2MeasurementInterval = HRMonitoringInterval.ThirtyMin)
+            dao.setWatchSettingsTransactionally(selected)
+            assertEquals(selected, dao.getWatchSettings().first())
+            val enabledEntry = assertNotNull(dao.getEntry(KEY_BLOOD_OXYGEN_PREFERENCES))
+            val intervalEntry = assertNotNull(dao.getEntry(KEY_SPO2_PREFERENCES))
+            assertContentEquals(ubyteArrayOf(1u), enabledEntry.value(oxygenParams()))
+            assertContentEquals(ubyteArrayOf(1u), intervalEntry.value(oxygenParams()))
+            assertNull(enabledEntry.value(oxygenParams().copy(
+                firmwareVersion = oxygenParams().firmwareVersion.copy(minor = 3))))
+            // Saving an unrelated legacy snapshot must not erase known oxygen values.
+            dao.setWatchSettingsTransactionally(original.copy(ageYears = 48))
+            assertEquals(selected.copy(ageYears = 48), dao.getWatchSettings().first())
+            assertEquals(enabledEntry.timestamp, dao.getEntry(KEY_BLOOD_OXYGEN_PREFERENCES)?.timestamp)
+            val write = DbWrite(1u, BlobDatabase.HealthParams, 1800000000u,
+                KEY_BLOOD_OXYGEN_PREFERENCES.encodeToByteArray().toUByteArray(),
+                ubyteArrayOf(0u), WriteType.Write)
+            assertEquals(BlobResponse.BlobStatus.Success, dao.handleWrite(write, "test-watch", oxygenParams()))
+            assertEquals(false, dao.getWatchSettings().first().bloodOxygenEnabled)
+            assertEquals(HRMonitoringInterval.ThirtyMin, dao.getWatchSettings().first().spo2MeasurementInterval)
+            assertEquals(BlobResponse.BlobStatus.InvalidData,
+                dao.handleWrite(write.copy(timestamp = 1800000001u, value = ubyteArrayOf(2u)), "test-watch", oxygenParams()))
+            assertEquals(false, dao.getWatchSettings().first().bloodOxygenEnabled)
+        }
+    }
+
+    @Test
+    fun oxygenWireValuesAreStrictAndMatchFirmware() {
+        for (enabled in listOf(false, true)) {
+            val encoded = enabled.toString()
+            assertEquals(encoded, decodeOxygenPreference(KEY_BLOOD_OXYGEN_PREFERENCES,
+                oxygenPreferenceBytes(KEY_BLOOD_OXYGEN_PREFERENCES, encoded)))
+        }
+        for (interval in 0..3) {
+            assertContentEquals(ubyteArrayOf(interval.toUByte()),
+                oxygenPreferenceBytes(KEY_SPO2_PREFERENCES, interval.toString()))
+            assertEquals(interval.toString(), decodeOxygenPreference(KEY_SPO2_PREFERENCES,
+                ubyteArrayOf(interval.toUByte())))
+        }
+        for (invalid in listOf(ubyteArrayOf(), ubyteArrayOf(0u, 1u), ubyteArrayOf(255u))) {
+            assertFails { decodeOxygenPreference(KEY_SPO2_PREFERENCES, invalid) }
+            assertFails { decodeOxygenPreference(KEY_BLOOD_OXYGEN_PREFERENCES, invalid) }
+        }
+    }
+
     @Test
     fun absentSettingsAreInitializedAsOneCompleteRecord() = runTest {
         withHealthSettingsDao { dao ->
@@ -130,6 +198,8 @@ class HealthSettingsInitializationJvmTest {
                         ageYears = 58,
                         imperialUnits = true,
                         maxHr = 177,
+                        bloodOxygenEnabled = true,
+                        spo2MeasurementInterval = HRMonitoringInterval.OneHour,
                     ),
                 )
             }
@@ -188,3 +258,10 @@ class HealthSettingsInitializationJvmTest {
         )
     }
 }
+
+private fun oxygenParams() = ValueParams(
+    platform = WatchType.BASALT,
+    capabilities = setOf(ProtocolCapsFlag.SupportsHealthInsights),
+    firmwareVersion = FirmwareVersion("v4.41.2", Instant.DISTANT_PAST, 4, 41, 2, null, "", false, false, false),
+    libPebbleConfigFlow = LibPebbleConfigFlow(MutableStateFlow(LibPebbleConfig())),
+)

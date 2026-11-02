@@ -25,6 +25,9 @@ import io.rebble.libpebblecommon.database.entity.HrmPreferencesValue.Companion.e
 import io.rebble.libpebblecommon.database.entity.UnitsDistanceValue
 import io.rebble.libpebblecommon.database.entity.UnitsDistanceValue.Companion.encodeToString
 import io.rebble.libpebblecommon.database.entity.defaultHealthSettings
+import io.rebble.libpebblecommon.database.entity.KEY_BLOOD_OXYGEN_PREFERENCES
+import io.rebble.libpebblecommon.database.entity.KEY_SPO2_PREFERENCES
+import io.rebble.libpebblecommon.database.entity.decodeOxygenPreference
 import io.rebble.libpebblecommon.packets.blobdb.BlobResponse
 import io.rebble.libpebblecommon.services.blobdb.DbWrite
 import io.rebble.libpebblecommon.util.DataBuffer
@@ -32,7 +35,7 @@ import kotlin.time.Instant
 
 @Dao
 interface HealthSettingsEntryRealDao : HealthSettingsEntryDao {
-    /** Persist the four-part health settings record as one durable Room transaction. */
+    /** Persist the health settings record as one durable Room transaction. */
     @Transaction
     suspend fun setWatchSettingsTransactionally(settings: HealthSettings) {
         setWatchSettings(settings)
@@ -66,6 +69,8 @@ interface HealthSettingsEntryRealDao : HealthSettingsEntryDao {
 
         val decodedValue = try {
             when (key) {
+                KEY_BLOOD_OXYGEN_PREFERENCES, KEY_SPO2_PREFERENCES ->
+                    decodeOxygenPreference(key, write.value)
                 "activityPreferences" -> {
                     val blob = ActivityPrefsBlobItem(
                         heightMm = 0u, weightDag = 0u,
