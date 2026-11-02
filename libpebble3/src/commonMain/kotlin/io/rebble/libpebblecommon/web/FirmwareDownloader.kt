@@ -15,7 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlin.time.Duration
@@ -46,31 +46,45 @@ class FirmwareDownloader(
         validateResponse: ((HttpResponse) -> Boolean)? = null,
     ): Path? {
         logger.d { "downloadFirmware: $url" }
-        return withTimeoutOr(30.seconds, {
-            val path = Path(fwDir, "download.$type")
-            SystemFileSystem.delete(path, mustExist = false)
-            val response = try {
-                httpClient.get(url)
-            } catch (e: IOException) {
-                logger.w(e) { "Error downloading fw: ${e.message}" }
-                return@withTimeoutOr null
+        val path = Path(fwDir, "download.$type")
+        var complete = false
+        return try {
+            withTimeoutOr(30.seconds, {
+                SystemFileSystem.delete(path, mustExist = false)
+                val response = httpClient.get(url)
+                if (!response.status.isSuccess()) {
+                    logger.w { "Firmware download returned HTTP ${response.status.value}" }
+                    return@withTimeoutOr null
+                }
+                if (validateResponse != null && !validateResponse(response)) {
+                    logger.w { "unexpected response type for .$type download" }
+                    return@withTimeoutOr null
+                }
+                SystemFileSystem.sink(path).use { sink ->
+                    response.bodyAsChannel().readRemaining().transferTo(sink)
+                }
+                complete = true
+                logger.v { "Downloaded firmware to $path" }
+                path
+            }) {
+                logger.w { "downloadFirmware timed out" }
+                null
             }
-            if (!response.status.isSuccess()) {
-                logger.w("http call failed: $response")
-                return@withTimeoutOr null
-            }
-            if (validateResponse != null && !validateResponse(response)) {
-                logger.w { "unexpected response type for .$type download" }
-                return@withTimeoutOr null
-            }
-            SystemFileSystem.sink(path).use { sink ->
-                response.bodyAsChannel().readRemaining().transferTo(sink)
-            }
-            logger.v { "Downloaded firmware to $path" }
-            path
-        }) {
-            logger.w { "downloadFirmware timed out" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // DNS/socket setup can throw non-IO exceptions; body reads and disk writes can
+            // fail too. None of these should cancel the watch's connection scope.
+            logger.w(e) { "Firmware download failed" }
             null
+        } finally {
+            if (!complete) {
+                try {
+                    SystemFileSystem.delete(path, mustExist = false)
+                } catch (e: Exception) {
+                    logger.w(e) { "Could not remove incomplete firmware download" }
+                }
+            }
         }
     }
 }
