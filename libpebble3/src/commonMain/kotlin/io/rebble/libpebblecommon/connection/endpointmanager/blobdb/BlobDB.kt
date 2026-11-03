@@ -42,6 +42,7 @@ import io.rebble.libpebblecommon.services.blobdb.BlobDBService
 import io.rebble.libpebblecommon.services.blobdb.DbWrite
 import io.rebble.libpebblecommon.services.blobdb.WriteType
 import io.rebble.libpebblecommon.web.withTimeoutOr
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -100,6 +101,9 @@ data class BlobDbDaos(
         // because typing
     } as Set<BlobDbDao<BlobDbRecord>>
     
+    suspend fun needsOxygenSettingsSync(version: FirmwareVersion): Boolean =
+        healthSettingsDao.needsOxygenSettingsSync(version)
+
     fun getVibePatternDao(): VibePatternDao = vibePatternDao
     fun getNotificationRuleDao(): io.rebble.libpebblecommon.database.dao.NotificationRuleDao = notificationRuleDao
 
@@ -308,20 +312,7 @@ class BlobDB(
                 }
             }
 
-            if (unfaithful || !deviceHasPreviouslySyncedSettings) {
-                if (blobDbVersion >= 1) {
-                    // Request a full sync of watch prefs
-                    val dirtyResponse = blobDBService.send(
-                        BlobDB2Command.MarkAllDirty(
-                            generateToken(),
-                            BlobDatabase.WatchPrefs,
-                        )
-                    )
-                    logger.v { "Marked all dirty for watch prefs: $dirtyResponse" }
-                }
-            }
-
-            watchScope.launch {
+            watchScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 blobDBService.writes.collect { message ->
                     logger.v { "write: $message" }
                     if (message.database == BlobDatabase.WatchPrefs && !deviceHasPreviouslySyncedSettings) {
@@ -346,6 +337,20 @@ class BlobDB(
                         )
                     }
                     blobDBService.sendResponse(response)
+                }
+            }
+
+            if (unfaithful || !deviceHasPreviouslySyncedSettings
+                || blobDatabases.needsOxygenSettingsSync(firmwareVersion)) {
+                if (blobDbVersion >= 1) {
+                    // Read watch preferences before writing a new oxygen layout; preserve activity.
+                    val dirtyResponse = blobDBService.send(
+                        BlobDB2Command.MarkAllDirty(
+                            generateToken(),
+                            BlobDatabase.WatchPrefs,
+                        )
+                    )
+                    logger.v { "Marked all dirty for watch prefs: $dirtyResponse" }
                 }
             }
 

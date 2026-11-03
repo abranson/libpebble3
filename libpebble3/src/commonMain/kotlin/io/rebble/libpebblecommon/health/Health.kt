@@ -478,6 +478,8 @@ data class HealthSettings(
     // Null means no preference received or explicitly chosen; do not write a default to the watch.
     val bloodOxygenEnabled: Boolean? = null,
     val spo2MeasurementInterval: HRMonitoringInterval? = null,
+    // Preserved from the modern combined watch preference, not edited by the Health dialog.
+    val spo2ActivityTrackingEnabled: Boolean? = null,
 )
 
 /** Result of atomically initializing a previously empty health-settings store. */

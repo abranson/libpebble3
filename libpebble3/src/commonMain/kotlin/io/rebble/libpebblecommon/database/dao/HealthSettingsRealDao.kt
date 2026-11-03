@@ -28,6 +28,9 @@ import io.rebble.libpebblecommon.database.entity.defaultHealthSettings
 import io.rebble.libpebblecommon.database.entity.KEY_BLOOD_OXYGEN_PREFERENCES
 import io.rebble.libpebblecommon.database.entity.KEY_SPO2_PREFERENCES
 import io.rebble.libpebblecommon.database.entity.decodeOxygenPreference
+import io.rebble.libpebblecommon.database.entity.OxygenPreferencesValue
+import io.rebble.libpebblecommon.database.entity.usesCombinedOxygenPreferences
+import io.rebble.libpebblecommon.services.FirmwareVersion
 import io.rebble.libpebblecommon.packets.blobdb.BlobResponse
 import io.rebble.libpebblecommon.services.blobdb.DbWrite
 import io.rebble.libpebblecommon.util.DataBuffer
@@ -60,6 +63,10 @@ interface HealthSettingsEntryRealDao : HealthSettingsEntryDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM HealthSettingsEntryEntity)")
     suspend fun hasPersistedHealthSettings(): Boolean
+
+    suspend fun needsOxygenSettingsSync(version: FirmwareVersion): Boolean =
+        usesCombinedOxygenPreferences(version) && getEntry(KEY_SPO2_PREFERENCES)?.value
+            ?.let(OxygenPreferencesValue::fromString)?.combinedBytes() == null
 
     @Transaction
     override suspend fun handleWrite(write: DbWrite, transport: String, params: ValueParams): BlobResponse.BlobStatus {
@@ -143,7 +150,12 @@ interface HealthSettingsEntryRealDao : HealthSettingsEntryDao {
         }
 
         val existing = getEntry(key)
-        if (existing != null && writeTimestamp.instant <= existing.timestamp.instant) {
+        // The first combined watch record replaces an old interval-only phone row, even
+        // when that row has a later timestamp: its old wire format never applied correctly.
+        val firstCombinedOxygen = key == KEY_SPO2_PREFERENCES && write.value.size == 3
+            && existing?.value?.let(OxygenPreferencesValue::fromString)?.combinedBytes() == null
+        if (!firstCombinedOxygen && existing != null
+            && writeTimestamp.instant <= existing.timestamp.instant) {
             logger.d {
                 "Health settings handleWrite stale: $key write=${writeTimestamp.instant} " +
                         "existing=${existing.timestamp.instant}"
