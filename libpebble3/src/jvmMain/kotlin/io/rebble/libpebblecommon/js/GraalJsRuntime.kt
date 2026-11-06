@@ -19,6 +19,7 @@ internal class GraalJsRuntime(private val logger: Logger) {
         interfaces = instances
         val js = Context.newBuilder("js")
             .allowExperimentalOptions(true)
+            .option("js.text-encoding", "true")
             .option("js.ecmascript-version", "2022")
             .allowHostAccess(HostAccess.NONE)
             .allowPolyglotAccess(PolyglotAccess.NONE)
