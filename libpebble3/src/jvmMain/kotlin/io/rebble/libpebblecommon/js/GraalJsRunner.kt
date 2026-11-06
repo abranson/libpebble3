@@ -141,6 +141,7 @@ class GraalJsRunner(
     override suspend fun start() {
         withContext(threadContext) {
             setupContext()
+            evalNow(BASE64_JS)
             evaluateResourceScript("XMLHTTPRequest")
             evaluateResourceScript("JSTimeout")
             evaluateResourceScript("WebSocket")
