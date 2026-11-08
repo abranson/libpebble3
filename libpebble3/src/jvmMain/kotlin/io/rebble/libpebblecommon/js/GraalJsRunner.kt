@@ -71,6 +71,7 @@ class GraalJsRunner(
         val context = Context.newBuilder("js")
             .allowExperimentalOptions(true)
             .option("js.ecmascript-version", "2022")
+            .option("js.text-encoding", "true")
             .out(LoggingOutputStream(logger, false))
             .err(LoggingOutputStream(logger, true))
             .build()
@@ -140,6 +141,7 @@ class GraalJsRunner(
     override suspend fun start() {
         withContext(threadContext) {
             setupContext()
+            evalNow(BASE64_JS)
             evaluateResourceScript("XMLHTTPRequest")
             evaluateResourceScript("JSTimeout")
             evaluateResourceScript("WebSocket")
