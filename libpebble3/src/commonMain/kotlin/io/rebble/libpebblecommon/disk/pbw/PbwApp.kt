@@ -59,6 +59,9 @@ class PbwApp(private val path: Path) {
 fun PbwApp.bestVariantFor(watchType: WatchType): WatchType? =
     watchType.getCompatibleAppVariants().firstOrNull { getManifest(it) != null }
 
+/** False for a plugin-only pbw (a plugin, no watchapp binary for any platform). */
+fun PbwApp.hasWatchappBuild(): Boolean = WatchType.entries.any { getManifest(it) != null }
+
 fun PbwApp.toLockerEntry(
     now: Instant,
     orderIndex: Int,
@@ -97,5 +100,14 @@ fun PbwApp.toLockerEntry(
         appstoreData = null,
         orderIndex = orderIndex,
         capabilities = info.capabilities,
+        pluginManifest = info.encodedPluginManifest(),
+        configPage = info.configPage,
+        manifestVersion = info.manifestVersion,
     ).let { entry -> storeMetadata?.applyTo(entry) ?: entry }
 }
+
+private val pbwPluginJson = Json { encodeDefaults = true }
+
+/** As stored in `LockerEntry.pluginManifest`. */
+internal fun PbwAppInfo.encodedPluginManifest(): String? =
+    loadablePlugin?.let { pbwPluginJson.encodeToString(PluginManifest.serializer(), it) }

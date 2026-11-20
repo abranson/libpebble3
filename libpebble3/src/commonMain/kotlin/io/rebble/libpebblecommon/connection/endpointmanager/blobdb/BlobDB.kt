@@ -213,7 +213,7 @@ class BlobDB(
                                 dao.dirtyRecordsForWatchInsert(
                                     transport = identifier.asString,
                                     timestampMs = now,
-                                    insertOnlyAfterMs = initialTimestamp.toEpochMilliseconds(),
+                                    insertOnlyAfterMs = insertOnlyAfter.toEpochMilliseconds(),
                                 )
                             } else {
                                 dao.dirtyRecordsForWatchDelete(identifier.asString, now)
@@ -401,7 +401,7 @@ class BlobDB(
                     )
                     else -> db.deleteStaleRecords(now)
                 }
-                dynamicQuery(dao = db, insert = true) { dirty ->
+                dynamicQuery(dao = db, insert = true, insertOnlyAfter = insertOnlyAfter) { dirty ->
                     dirty.forEach { item ->
                         operationLock.withLock {
                             if (isCurrentTimelineEligibility(db, item, insert = true)) {

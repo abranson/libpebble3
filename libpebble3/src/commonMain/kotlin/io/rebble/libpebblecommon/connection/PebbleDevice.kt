@@ -287,3 +287,6 @@ fun PebbleDevice.color() = when (this) {
     is BleDiscoveredPebbleDevice -> pebbleScanRecord.watchColor()
     else -> null
 }
+
+internal fun PebbleLeScanRecord.watchColor(): WatchColor? =
+    extendedInfo?.color?.let { WatchColor.fromProtocolNumber(it.toInt()) }

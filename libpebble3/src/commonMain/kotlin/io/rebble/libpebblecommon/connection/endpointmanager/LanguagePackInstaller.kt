@@ -142,7 +142,7 @@ class RealLanguagePackInstaller(
         val previousLanguage = (_state.value as? LanguagePackInstallState.Idle)?.activeLanguage
         fun idle(error: String? = null): LanguagePackInstallState.Idle {
             error?.let { errorTracker.reportError(UserFacingError.FailedToInstallLanguagePack(it)) }
-            return LanguagePackInstallState.Idle(activeLanguage = previousLanguage)
+            return LanguagePackInstallState.Idle(activeLanguage = previousLanguage, previousError = error)
         }
         val progressFlow = MutableStateFlow(0.0f)
         _state.value = LanguagePackInstallState.Downloading(name)
@@ -198,6 +198,7 @@ class RealLanguagePackInstaller(
                 logger.d { "installLanguagePack done" }
                 _state.value = LanguagePackInstallState.Idle(
                     activeLanguage = if (addToExisting && !activated) previousLanguage else name,
+                    successfullyInstalledLanguage = name,
                 )
             } catch (e: CancellationException) {
                 _state.value = idle()
@@ -216,6 +217,8 @@ class RealLanguagePackInstaller(
 sealed class LanguagePackInstallState {
     data class Idle(
         val activeLanguage: String? = null,
+        val successfullyInstalledLanguage: String? = null,
+        val previousError: String? = null,
     ) : LanguagePackInstallState()
     data class Downloading(val language: String) : LanguagePackInstallState()
     data class Installing(val progress: StateFlow<Float>, val language: String) :
@@ -242,3 +245,27 @@ data class InstalledLanguagePack(
     val isoLocal: String,
     val version: Int,
 )
+
+data class WatchLanguagePack(
+    val slot: Int,
+    val locale: String,
+    val name: String,
+    val version: Int,
+    val readable: Boolean,
+    val hasTranslation: Boolean,
+    val isActive: Boolean,
+)
+
+internal fun SystemMessage.LanguagePacksResponse.toWatchLanguagePacks(): List<WatchLanguagePack> =
+    packs.filter { it.present }.map {
+        val slot = it.slot.get().toInt()
+        WatchLanguagePack(
+            slot = slot,
+            locale = it.locale.get(),
+            name = it.name.get(),
+            version = it.version.get().toInt(),
+            readable = it.readable,
+            hasTranslation = it.hasTranslation,
+            isActive = activeSlot.get().toInt() == slot,
+        )
+    }

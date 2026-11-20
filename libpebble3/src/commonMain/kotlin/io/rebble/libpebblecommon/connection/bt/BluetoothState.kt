@@ -27,13 +27,6 @@ expect fun nativeBluetoothStateFlow(appContext: AppContext): Flow<BluetoothState
 
 expect fun locationServicesBlockScanning(appContext: AppContext): Boolean
 
-/**
- * Whether BLE scanning prerequisites are met. Backed by Kable's availability API on
- * android/ios (covers e.g. Android <12 location-services requirement); adapter power
- * state on jvm/Linux.
- */
-internal expect fun bluetoothAvailabilityFlow(appContext: AppContext): Flow<Boolean>
-
 class RealBluetoothStateProvider(
     private val libPebbleCoroutineScope: LibPebbleCoroutineScope,
     private val appContext: AppContext,
@@ -45,17 +38,7 @@ class RealBluetoothStateProvider(
 
     override fun init() {
         libPebbleCoroutineScope.launch {
-            bluetoothAvailabilityFlow(appContext).collect { available ->
-                _scanningAvailable.value = available
-                if (nativeFlow == null) {
-                    _state.value = if (available) BluetoothState.Enabled else BluetoothState.Disabled
-                }
-            }
-        }
-        if (nativeFlow != null) {
-            libPebbleCoroutineScope.launch {
-                nativeFlow.collect { _state.value = it }
-            }
+            nativeBluetoothStateFlow(appContext).collect { _state.value = it }
         }
     }
 }

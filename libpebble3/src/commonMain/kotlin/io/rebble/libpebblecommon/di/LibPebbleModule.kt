@@ -359,6 +359,7 @@ fun initKoin(
     proxyTokenProvider: StateFlow<String?>,
     transcriptionProvider: TranscriptionProvider,
     injectedPKJSHttpInterceptors: InjectedPKJSHttpInterceptors,
+    pluginOAuthApi: PluginOAuthApi? = null,
     /**
      * Bindings that replace [platformModule]'s defaults. [platformModule] is an `expect`/`actual`,
      * so only this module can ever supply one — a downstream consumer (a distro's daemon, say)

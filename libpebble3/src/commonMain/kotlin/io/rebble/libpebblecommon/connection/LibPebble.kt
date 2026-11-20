@@ -99,6 +99,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.io.files.Path
@@ -124,7 +125,8 @@ sealed class PebbleConnectionEvent {
 @Stable
 interface LibPebble : Scanning, RequestSync, LockerApi, NotificationApps, CallManagement, Calendar,
     OtherPebbleApps, PKJSToken, Watches, Errors, Contacts, AnalyticsEvents, HealthApi, WatchPrefs,
-    SystemGeolocation, Timeline, Vibrations, Weather, HealthDataApi, Plugins, SendTextConfiguration {
+    SystemGeolocation, Timeline, Vibrations, Weather, HealthDataApi, Plugins, AppPermissionsApi,
+    PluginFileAccessApi, NotificationReplies, AppDataUsageApi, PluginActionLogApi, SendTextConfiguration {
     fun init()
 
     val config: StateFlow<LibPebbleConfig>
@@ -445,6 +447,9 @@ sealed class FirmwareUpdateCheckResult {
 interface Calendar {
     fun calendars(): Flow<List<CalendarEntity>>
     fun updateCalendarEnabled(calendarId: Int, enabled: Boolean)
+    suspend fun createEvent(calendarId: Int, event: NewCalendarEvent): String?
+    /** The synced calendar matching the platform's default for new events, if known. */
+    suspend fun defaultCalendar(): CalendarEntity?
 
     /**
      * Reconcile one complete platform-calendar snapshot into the durable Timeline projection.
@@ -453,8 +458,6 @@ interface Calendar {
      */
     suspend fun syncCalendars(beginCommit: () -> Boolean = { true }): CalendarSyncOutcome
 
-    /** Create an event in the device's primary/default calendar. Returns the new event id, or null. */
-    suspend fun createEvent(event: NewCalendarEvent): String?
 }
 
 sealed interface CalendarSyncOutcome {
@@ -493,8 +496,14 @@ interface LockerApi {
     /**
      * @return true if the app was successfully synced and launched on all connected watches.
      */
-    /** [loadOnWatch] launches it once it has synced; leave it off for background installs. */
-    suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean = true): Boolean
+    /**
+     * [loadOnWatch] launches it once it has synced; leave it off for background installs.
+     * [granted]: the answers to [reviewSideload].
+     */
+    suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean = true, granted: Map<String, Boolean?> = emptyMap()): Boolean
+    /** Null if there's nothing to ask, or the pbw can't be read. */
+    suspend fun reviewSideload(pbwPath: Path): InstallReview?
+    suspend fun reviewInstall(appUuid: Uuid, appName: String, requested: RequestedPermissions): InstallReview?
     /** Import a store download with its identity and artwork, without requiring an account. */
     suspend fun sideloadApp(
         pbwPath: Path,
@@ -529,9 +538,14 @@ interface LockerApi {
     suspend fun waitUntilAppSyncedToWatch(id: Uuid, identifier: PebbleIdentifier, timeout: Duration): Boolean
     /** Also erases everything the app stored, on this phone and on connected watches. */
     suspend fun removeApp(id: Uuid): Boolean
-    suspend fun addAppToLocker(app: LockerEntry)
-    suspend fun addAppsToLocker(apps: List<LockerEntry>)
-
+    suspend fun addAppToLocker(app: LockerEntry, granted: Map<String, Boolean?> = emptyMap())
+    /** [permissions]: the user's decisions for these apps from other devices or the web store. */
+    suspend fun addAppsToLocker(
+        apps: List<LockerEntry>,
+        permissions: Map<Uuid, Map<String, PermissionDecisionRecord>> = emptyMap(),
+    )
+    /** Lets the next locker sync replace a sideloaded app with its copy in the user's locker. */
+    suspend fun clearSideloaded(id: Uuid)
     /** Add only if [session] still owns the account-backed locker. */
     suspend fun addAppToLocker(app: LockerEntry, session: WebAccountSession): Boolean = false
 
@@ -653,6 +667,13 @@ class LibPebble3(
     private val vibePatternDao: VibePatternDao,
     private val watchPreferences: WatchPrefs,
     private val weatherManager: WeatherManager,
+    private val appPermissions: AppPermissions,
+    private val appDataUsage: AppDataUsage,
+    pluginActionLog: PluginActionLog,
+    pluginClient: PluginClient,
+    pluginFileAccess: PluginFileAccess,
+    private val notificationReplies: NotificationReplies,
+    private val respectDoNotDisturbMigrator: RespectDoNotDisturbMigrator,
     private val sendTextManager: SendTextManager,
 ) : LibPebble, Scanning by scanning, RequestSync by webSyncManager, LockerApi by locker,
     NotificationApps by notificationApi, Calendar by phoneCalendarSyncer,
@@ -660,7 +681,10 @@ class LibPebble3(
     Errors by errorTracker, Contacts by contacts, AnalyticsEvents by analytics,
     HealthApi by health, SystemGeolocation by systemGeolocation, Timeline by timeline,
     Vibrations by notificationApi, WatchPrefs by watchPreferences, Weather by weatherManager,
-    HealthDataApi by health, Plugins by pluginRegistry, SendTextConfiguration by sendTextManager {
+    HealthDataApi by health, Plugins by pluginClient,
+    AppPermissionsApi by appPermissions, PluginFileAccessApi by pluginFileAccess,
+    NotificationReplies by notificationReplies, AppDataUsageApi by appDataUsage,
+    PluginActionLogApi by pluginActionLog, SendTextConfiguration by sendTextManager {
     private val logger = Logger.withTag("LibPebble3")
     private val initialized = AtomicBoolean(false)
 
@@ -712,6 +736,19 @@ class LibPebble3(
     /** Atomically reconcile all learned application mute states with canonical daemon policy. */
     suspend fun reconcileNotificationAppMuteStates(muteStates: Map<String, MuteState>) {
         notificationApi.reconcileNotificationAppMuteStates(muteStates)
+    }
+
+    /** A settings page may only decide permissions exposed for this installed app. */
+    suspend fun setInstalledAppPermission(id: Uuid, permission: String, granted: Boolean): Boolean {
+        var changed = false
+        locker.mutateForLiveLockerApp(id) {
+            if (locker.getApp(id)?.systemApp != false) return@mutateForLiveLockerApp
+            val statuses = locker.appPermissionStatuses(id).first().orEmpty()
+            if (statuses.none { it.permission == permission }) return@mutateForLiveLockerApp
+            appPermissions.setPermissionDecisions(id, mapOf(permission to granted))
+            changed = true
+        }
+        return changed
     }
 
     override fun init() {
@@ -824,10 +861,11 @@ class LibPebble3(
             proxyTokenProvider: StateFlow<String?>,
             transcriptionProvider: TranscriptionProvider,
             injectedPKJSHttpInterceptors: InjectedPKJSHttpInterceptors = InjectedPKJSHttpInterceptors(emptyList()),
+            pluginOAuthApi: PluginOAuthApi? = null,
             /** Platform bindings replacing the defaults; see [initKoin]. */
             platformOverrides: List<Module> = emptyList(),
         ): LibPebble {
-            koin = initKoin(defaultConfig, webServices, appContext, tokenProvider, proxyTokenProvider, transcriptionProvider, injectedPKJSHttpInterceptors, platformOverrides)
+            koin = initKoin(defaultConfig, webServices, appContext, tokenProvider, proxyTokenProvider, transcriptionProvider, injectedPKJSHttpInterceptors, pluginOAuthApi, platformOverrides)
             // Reads the persisted config (not defaultConfig), but must still precede anything that
             // touches Kable's shared central manager. Every Koin single here is lazy, and Kable is
             // only reached on the first scan/connect, which happens after create() returns.

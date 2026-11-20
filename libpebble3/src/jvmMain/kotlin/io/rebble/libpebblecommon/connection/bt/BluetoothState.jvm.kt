@@ -14,8 +14,8 @@ private val logger = Logger.withTag("BluetoothState.jvm")
 
 private const val ADAPTER_INTERFACE = "org.bluez.Adapter1"
 
-actual fun nativeBluetoothStateFlow(appContext: AppContext): Flow<BluetoothState>? {
-    val dm = BluezManager.deviceManagerOrNull() ?: return null
+actual fun nativeBluetoothStateFlow(appContext: AppContext): Flow<BluetoothState> {
+    val dm = BluezManager.deviceManagerOrNull() ?: return kotlinx.coroutines.flow.flowOf(BluetoothState.Disabled)
 
     fun currentState(): BluetoothState =
         if (BluezManager.defaultAdapter()?.isPowered == true) {
@@ -52,3 +52,5 @@ actual fun nativeBluetoothStateFlow(appContext: AppContext): Flow<BluetoothState
         }
     }.distinctUntilChanged()
 }
+
+actual fun locationServicesBlockScanning(appContext: AppContext): Boolean = false

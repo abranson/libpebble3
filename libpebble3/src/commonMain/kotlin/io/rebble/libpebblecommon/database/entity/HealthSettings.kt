@@ -198,6 +198,7 @@ internal fun defaultHealthSettings(): HealthSettings {
         activityInsightsEnabled = activity.activityInsightsEnabled,
         sleepInsightsEnabled = activity.sleepInsightsEnabled,
         ageYears = activity.ageYears,
+        birthYear = activity.birthYear,
         gender = activity.gender,
         imperialUnits = units.imperialUnits,
         hrmEnabled = hrm.enabled,
@@ -214,6 +215,17 @@ internal fun defaultHealthSettings(): HealthSettings {
 
 suspend fun HealthSettingsEntryDao.setWatchSettings(healthSettings: HealthSettings) {
     val now = Clock.System.now().asMillisecond()
+    val activityPrefs = ActivityPrefsValue(
+        heightMm = healthSettings.heightMm,
+        weightDag = healthSettings.weightDag,
+        trackingEnabled = healthSettings.trackingEnabled,
+        activityInsightsEnabled = healthSettings.activityInsightsEnabled,
+        sleepInsightsEnabled = healthSettings.sleepInsightsEnabled,
+        ageYears = healthSettings.ageYears,
+        birthYear = healthSettings.birthYear,
+        gender = healthSettings.gender,
+    ).withBirthYear(currentYear())
+
     // Only explicitly known oxygen preferences are persisted, independently of legacy settings.
     healthSettings.bloodOxygenEnabled?.let {
         val encoded = json.encodeToString(it)
@@ -235,15 +247,7 @@ suspend fun HealthSettingsEntryDao.setWatchSettings(healthSettings: HealthSettin
     insertOrReplace(
         HealthSettingsEntry(
             id = KEY_ACTIVITY_PREFERENCES,
-            value = ActivityPrefsValue(
-                heightMm = healthSettings.heightMm,
-                weightDag = healthSettings.weightDag,
-                trackingEnabled = healthSettings.trackingEnabled,
-                activityInsightsEnabled = healthSettings.activityInsightsEnabled,
-                sleepInsightsEnabled = healthSettings.sleepInsightsEnabled,
-                ageYears = healthSettings.ageYears,
-                gender = healthSettings.gender,
-            ).encodeToString(),
+            value = activityPrefs.encodeToString(),
             timestamp = now,
         )
     )
@@ -270,15 +274,42 @@ suspend fun HealthSettingsEntryDao.setWatchSettings(healthSettings: HealthSettin
     insertOrReplace(
         HealthSettingsEntry(
             id = KEY_HEART_RATE_PREFERENCES,
-            value = HeartRatePreferencesValue(
+            value = HeartRatePreferencesValue.forAge(
+                ageYears = activityPrefs.ageYears,
                 restingHr = healthSettings.restingHr,
                 elevatedHr = healthSettings.elevatedHr,
-                maxHr = healthSettings.maxHr,
-                zone1Threshold = healthSettings.hrZone1Threshold,
-                zone2Threshold = healthSettings.hrZone2Threshold,
-                zone3Threshold = healthSettings.hrZone3Threshold,
             ).encodeToString(),
             timestamp = now,
+        )
+    )
+}
+
+/** Re-derives the age from the birth year (filling it in if missing), and the heart rate zones from the age. */
+suspend fun HealthSettingsEntryDao.updateAgeDerivedSettings() {
+    val stored = ActivityPrefsValue.fromString(getEntry(KEY_ACTIVITY_PREFERENCES)?.value) ?: return
+    val activityPrefs = stored.withBirthYear(currentYear())
+    if (activityPrefs != stored) {
+        insertOrReplace(
+            HealthSettingsEntry(
+                id = KEY_ACTIVITY_PREFERENCES,
+                value = activityPrefs.encodeToString(),
+                timestamp = Clock.System.now().asMillisecond(),
+            )
+        )
+    }
+    val current = HeartRatePreferencesValue.fromString(getEntry(KEY_HEART_RATE_PREFERENCES)?.value)
+        ?: HeartRatePreferencesValue()
+    val derived = HeartRatePreferencesValue.forAge(
+        ageYears = activityPrefs.ageYears,
+        restingHr = current.restingHr,
+        elevatedHr = current.elevatedHr,
+    )
+    if (derived == current) return
+    insertOrReplace(
+        HealthSettingsEntry(
+            id = KEY_HEART_RATE_PREFERENCES,
+            value = derived.encodeToString(),
+            timestamp = Clock.System.now().asMillisecond(),
         )
     )
 }
@@ -291,8 +322,15 @@ data class ActivityPrefsValue(
     val activityInsightsEnabled: Boolean = false,
     val sleepInsightsEnabled: Boolean = false,
     val ageYears: Int = 35,
+    val birthYear: Int? = null, // Phone-only; the watch only knows ageYears
     val gender: HealthGender = HealthGender.Female,
 ) {
+    /** Derives age from birth year, or birth year from age if it isn't known yet. */
+    fun withBirthYear(currentYear: Int): ActivityPrefsValue = when (birthYear) {
+        null -> copy(birthYear = currentYear - ageYears)
+        else -> copy(ageYears = currentYear - birthYear)
+    }
+
     companion object {
         fun ActivityPrefsValue.encodeToString(): String = json.encodeToString(this)
         fun fromString(value: String?): ActivityPrefsValue? = value?.let { json.decodeFromString(value) }
@@ -359,6 +397,29 @@ data class HeartRatePreferencesValue(
     companion object {
         fun HeartRatePreferencesValue.encodeToString(): String = json.encodeToString(this)
         fun fromString(value: String?): HeartRatePreferencesValue? = value?.let { json.decodeFromString(value) }
+
+        /**
+         * Max HR is 220 - age and the zones start at 50%, 70% and 85% of the heart rate reserve,
+         * as the firmware defaults do for age 30.
+         */
+        fun forAge(
+            ageYears: Int,
+            restingHr: Short = 70,
+            elevatedHr: Short = 100,
+        ): HeartRatePreferencesValue {
+            val maxHr = (220 - ageYears.coerceIn(1, 120)).coerceAtLeast(elevatedHr.toInt())
+            val reserve = (maxHr - restingHr).coerceAtLeast(0)
+            fun threshold(percent: Int) = (restingHr + (reserve * percent + 50) / 100).toShort()
+            return HeartRatePreferencesValue(
+                restingHr = restingHr,
+                elevatedHr = elevatedHr,
+                maxHr = maxHr.toShort(),
+                zone1Threshold = threshold(50),
+                zone2Threshold = threshold(70),
+                zone3Threshold = threshold(85),
+            )
+        }
+
         fun HeartRatePreferencesValue.asBytes(): UByteArray = HeartRatePreferencesBlobItem(
             restingHr = restingHr.toUByte(),
             elevatedHr = elevatedHr.toUByte(),
@@ -436,14 +497,18 @@ enum class HealthGender(
 }
 
 enum class HRMonitoringInterval(val value: Byte) {
+    FiveMin(4),
     TenMin(0),
     ThirtyMin(1),
     OneHour(2),
     Disabled(3),
     ;
 
+    fun isSupportedBy(firmwareVersion: FirmwareVersion): Boolean =
+        this != FiveMin || firmwareVersion >= FW_HRM_FIVE_MIN
+
     companion object {
-        fun fromInt(value: Byte) = entries.first { it.value == value }
+        fun fromInt(value: Byte) = entries.firstOrNull { it.value == value } ?: TenMin
     }
 }
 
@@ -472,7 +537,7 @@ internal data class OxygenPreferencesValue(
     val activityTrackingEnabled: Boolean? = null,
 ) {
     init {
-        HRMonitoringInterval.fromInt(interval)
+        require(HRMonitoringInterval.entries.any { it.value == interval }) { "Unknown oxygen monitoring interval: $interval" }
     }
 
     fun combinedBytes(): UByteArray? {

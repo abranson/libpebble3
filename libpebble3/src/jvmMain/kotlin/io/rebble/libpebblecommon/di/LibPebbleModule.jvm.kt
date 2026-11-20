@@ -36,6 +36,7 @@ import io.rebble.libpebblecommon.notification.NotificationListenerConnection
 import io.rebble.libpebblecommon.packets.PhoneAppVersion
 import io.rebble.libpebblecommon.packets.ProtocolCapsFlag
 import io.rebble.libpebblecommon.plugin.PhoneBatteryMonitor
+import io.rebble.libpebblecommon.plugin.PhoneSoundPlayer
 import io.rebble.libpebblecommon.plugin.PhoneNetworkMonitor
 import io.rebble.libpebblecommon.plugin.PlatformPlugins
 import io.rebble.libpebblecommon.util.SystemGeolocation
@@ -43,6 +44,8 @@ import org.koin.core.module.Module
 import org.koin.core.module.dsl.singleOf
 import org.koin.core.module.dsl.scopedOf
 import org.koin.dsl.bind
+import org.koin.dsl.binds
+import io.rebble.libpebblecommon.connection.NotificationReplies
 import org.koin.dsl.module
 
 /**
@@ -89,7 +92,7 @@ actual val platformModule: Module = module {
     singleOf(::FreedesktopNotificationBackend) bind LinuxNotificationBackend::class
     single { io.rebble.libpebblecommon.linux.notifications.LinuxNotificationImageStore() } bind io.rebble.libpebblecommon.imaging.NotificationImageProvider::class
     singleOf(::LinuxNotificationListener) bind NotificationListenerConnection::class
-    singleOf(::LinuxNotificationActionHandler) bind PlatformNotificationActionHandler::class
+    singleOf(::LinuxNotificationActionHandler) binds arrayOf(PlatformNotificationActionHandler::class, NotificationReplies::class)
 
     // Music: MPRIS2 works anywhere. Volume doesn't — MPRIS only has a per-player Volume, so a
     // distro with a system mixer overrides VolumeControl. MprisController is shared: it owns the
@@ -113,6 +116,7 @@ actual val platformModule: Module = module {
     singleOf(::JvmOtherPebbleApps) bind OtherPebbleApps::class
     singleOf(::PhoneBatteryMonitor)
     singleOf(::PhoneNetworkMonitor)
+    singleOf(::PhoneSoundPlayer)
     single { PlatformPlugins(emptySet()) }
 
     // BlueZ provides Classic discovery; direct RFCOMM is supplied through the factory below.

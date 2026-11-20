@@ -287,7 +287,7 @@ class RebbleWebServices private constructor(
         // build time — same-version watches would see a phantom update forever.
         val newer = latest.numeric() > watch.runningFwVersion.numeric()
         return if (watch.runningFwVersion.isRecovery || newer) {
-            FirmwareUpdateCheckResult.FoundUpdate(version = latest, url = url, notes = notes)
+            FirmwareUpdateCheckResult.FoundUpdate(version = latest, url = url, notes = notes, installsDirectly = false)
         } else {
             FirmwareUpdateCheckResult.FoundNoUpdate
         }
@@ -396,6 +396,7 @@ internal suspend fun latestGithubFirmware(
                     version = version,
                     url = asset.url,
                     notes = release.body.orEmpty(),
+                    installsDirectly = false,
                 )
             }
         }

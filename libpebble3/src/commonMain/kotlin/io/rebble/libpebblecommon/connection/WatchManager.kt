@@ -787,15 +787,18 @@ class WatchManager(
         }
         val platformIdentifier = createPlatformIdentifier.identifier(identifier, device.name, device.connectionFailureInfo != null)
         if (platformIdentifier == null) {
-            // Probably because it couldn't create the device (ios throws on an unknown persisted
-            // uuid, so we'll need to scan for it using the name/serial?)...
-            // ...but TODO revisit this once we have more error modes + handle BT being disabled.
-            if (device.knownWatchProps != null) {
-                logger.w("removing known device: $identifier")
-                updateWatch(identifier) { it.copy(connectGoal = false, forget = true) }
+            val failed = device.withFailureReason(ConnectionFailureReason.PeripheralNotFound)
+            if ((failed.connectionFailureInfo?.times ?: 0) >= PERIPHERAL_NOT_FOUND_MAX_ATTEMPTS) {
+                updateWatch(identifier) { failed.copy(connectGoal = false) }
+            } else if (activeConnections.add(identifier)) {
+                libPebbleCoroutineScope.launch {
+                    delay(PERIPHERAL_NOT_FOUND_RETRY_DELAY)
+                    synchronized(connectionGoalLock) {
+                        activeConnections.remove(identifier)
+                        updateWatch(identifier) { it.withFailureReason(ConnectionFailureReason.PeripheralNotFound) }
+                    }
+                }
             }
-            // Hack: force another connection-state pass.
-            updateWatch(identifier) { it.copy() }
             return@synchronized
         }
 

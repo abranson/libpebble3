@@ -1,6 +1,9 @@
 package io.rebble.libpebblecommon.linux.notifications
 
 import co.touchlab.kermit.Logger
+import io.rebble.libpebblecommon.connection.NotificationReplies
+import io.rebble.libpebblecommon.connection.DisplayedNotificationReplyResult
+import kotlin.time.Instant
 import io.rebble.libpebblecommon.connection.endpointmanager.timeline.PlatformNotificationActionHandler
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.entity.BaseAction
@@ -19,7 +22,11 @@ class LinuxNotificationActionHandler(
     private val listener: LinuxNotificationListener,
     private val notificationAppDao: NotificationAppRealDao,
     private val backend: LinuxNotificationBackend,
-) : PlatformNotificationActionHandler {
+) : PlatformNotificationActionHandler, NotificationReplies {
+    // The provider tracks actionable IDs, but cannot identify which one was displayed at a given time.
+    override suspend fun replyToDisplayedNotification(text: String, at: Instant) =
+        DisplayedNotificationReplyResult.Unsupported
+
     private val logger = Logger.withTag("LinuxNotificationActionHandler")
 
     override suspend fun invoke(

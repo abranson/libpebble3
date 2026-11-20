@@ -56,7 +56,7 @@ abstract class DevConnectionTransport(
     protected suspend fun installPBW(payload: ByteArray): Boolean {
         var path: Path? = null
         try {
-            val tempPath = getTempPbwPath()
+            val tempPath = getTempPath("pbw")
             path = tempPath
 
             withContext(Dispatchers.IO) {

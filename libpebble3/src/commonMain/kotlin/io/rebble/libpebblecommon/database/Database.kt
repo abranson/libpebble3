@@ -3,7 +3,6 @@ package io.rebble.libpebblecommon.database
 import androidx.room.AutoMigration
 import androidx.room.ConstructedBy
 import androidx.room.DeleteTable
-import androidx.room.RenameColumn
 import androidx.room.RoomDatabase
 import androidx.room.RoomDatabaseConstructor
 import androidx.room.TypeConverters
@@ -24,6 +23,7 @@ import io.rebble.libpebblecommon.database.dao.LockerEntryRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationAppRealDao
 import io.rebble.libpebblecommon.database.dao.NotificationDao
 import io.rebble.libpebblecommon.database.dao.NotificationRuleDao
+import io.rebble.libpebblecommon.database.dao.PluginActionLogDao
 import io.rebble.libpebblecommon.database.dao.SendTextContactRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineNotificationRealDao
 import io.rebble.libpebblecommon.database.dao.TimelinePinRealDao
@@ -31,10 +31,10 @@ import io.rebble.libpebblecommon.database.dao.TimelineReminderRealDao
 import io.rebble.libpebblecommon.database.dao.VibePatternDao
 import io.rebble.libpebblecommon.database.dao.WatchPrefRealDao
 import io.rebble.libpebblecommon.database.dao.WeatherAppRealDao
+import io.rebble.libpebblecommon.database.entity.AppDataUsageEntity
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntryDao
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntryEntity
 import io.rebble.libpebblecommon.database.entity.AppPrefsEntrySyncEntity
-import io.rebble.libpebblecommon.database.entity.AppDataUsageEntity
 import io.rebble.libpebblecommon.database.entity.CalendarEntity
 import io.rebble.libpebblecommon.database.entity.ContactEntity
 import io.rebble.libpebblecommon.database.entity.HealthDataEntity
@@ -51,13 +51,13 @@ import io.rebble.libpebblecommon.database.entity.NotificationAppItemEntity
 import io.rebble.libpebblecommon.database.entity.NotificationAppItemSyncEntity
 import io.rebble.libpebblecommon.database.entity.NotificationEntity
 import io.rebble.libpebblecommon.database.entity.NotificationRuleEntity
+import io.rebble.libpebblecommon.database.entity.OverlayDataEntity
+import io.rebble.libpebblecommon.database.entity.PluginActionLogEntity
 import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesDao
 import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesEntity
 import io.rebble.libpebblecommon.database.entity.SendTextCannedResponsesSyncEntity
 import io.rebble.libpebblecommon.database.entity.SendTextContactEntity
 import io.rebble.libpebblecommon.database.entity.SendTextContactSyncEntity
-import io.rebble.libpebblecommon.database.entity.OverlayDataEntity
-import io.rebble.libpebblecommon.database.entity.PluginActionLogEntity
 import io.rebble.libpebblecommon.database.entity.TimelineNotificationEntity
 import io.rebble.libpebblecommon.database.entity.TimelineNotificationSyncEntity
 import io.rebble.libpebblecommon.database.entity.TimelinePinEntity
@@ -105,12 +105,14 @@ internal const val DATABASE_FILENAME = "libpebble3.db"
         AppPrefsEntryEntity::class,
         AppPrefsEntrySyncEntity::class,
         NotificationRuleEntity::class,
+        AppDataUsageEntity::class,
+        PluginActionLogEntity::class,
         SendTextContactEntity::class,
         SendTextContactSyncEntity::class,
         SendTextCannedResponsesEntity::class,
         SendTextCannedResponsesSyncEntity::class,
     ],
-    version = 47,
+    version = 55,
     autoMigrations = [
         AutoMigration(from = 10, to = 11),
         AutoMigration(from = 11, to = 12),
@@ -148,6 +150,13 @@ internal const val DATABASE_FILENAME = "libpebble3.db"
         AutoMigration(from = 43, to = 44),
         AutoMigration(from = 44, to = 45),
         AutoMigration(from = 45, to = 46),
+        AutoMigration(from = 46, to = 47),
+        AutoMigration(from = 47, to = 48, spec = AutoMigration48::class),
+        AutoMigration(from = 48, to = 49),
+        AutoMigration(from = 49, to = 50),
+        AutoMigration(from = 50, to = 51, spec = AutoMigration51::class),
+        AutoMigration(from = 51, to = 52),
+        AutoMigration(from = 52, to = 53),
     ],
     exportSchema = true,
 )
@@ -172,6 +181,8 @@ abstract class Database : RoomDatabase() {
     abstract fun weatherAppDao(): WeatherAppRealDao
     abstract fun appPrefsDao(): AppPrefsEntryDao
     abstract fun notificationRuleDao(): NotificationRuleDao
+    abstract fun appDataUsageDao(): AppDataUsageDao
+    abstract fun pluginActionLogDao(): PluginActionLogDao
     abstract fun sendTextContactDao(): SendTextContactRealDao
     abstract fun sendTextCannedResponsesDao(): SendTextCannedResponsesDao
 }
@@ -191,10 +202,6 @@ class AutoMigration51 : AutoMigrationSpec {
     }
 }
 
-/** Microphone is bit 0, so its old 0/1 values carry over. */
-@RenameColumn(tableName = "LockerEntryEntity", fromColumnName = "microphoneGranted", toColumnName = "watchPermissions")
-class AutoMigration54 : AutoMigrationSpec
-
 @Suppress("NO_ACTUAL_FOR_EXPECT")
 expect object DatabaseConstructor : RoomDatabaseConstructor<Database> {
     override fun initialize(): Database
@@ -209,7 +216,7 @@ val MIGRATION_39_40 = object : Migration(39, 40) {
 
 fun getRoomDatabase(ctx: AppContext): Database {
     return getDatabaseBuilder(ctx)
-        .addMigrations(MIGRATION_39_40, MIGRATION_42_46, MIGRATION_46_47)
+        .addMigrations(MIGRATION_39_40, MIGRATION_53_54, MIGRATION_54_55)
         .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
         // V7 required a full re-create.
         .fallbackToDestructiveMigrationFrom(dropAllTables = true, 1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -219,45 +226,3 @@ fun getRoomDatabase(ctx: AppContext): Database {
 }
 
 internal expect fun getDatabaseBuilder(ctx: AppContext): RoomDatabase.Builder<Database>
-
-// The Linux fork shipped Send Text as schema 42 while upstream used 42 for weather.
-// Accept either layout without replacing tables or losing durable watch/user data.
-val MIGRATION_42_46 = object : Migration(42, 46) {
-    override fun migrate(connection: SQLiteConnection) {
-        addColumn(connection, "NotificationAppItemEntity", "sendImages", "INTEGER NOT NULL DEFAULT 1")
-        addColumn(connection, "WeatherAppEntryEntity", "todayFeelsLikeTemp", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "latitude", "REAL")
-        addColumn(connection, "WeatherAppEntryEntity", "longitude", "REAL")
-        addColumn(connection, "WeatherAppEntryEntity", "dailyForecast", "TEXT")
-        addColumn(connection, "WeatherAppEntryEntity", "todayUvIndexX10", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "todayPrecipProbability", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "todayWindSpeed", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "todayWindDirection", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "todayHourly", "TEXT")
-        addColumn(connection, "WeatherAppEntryEntity", "locationUtcOffsetMin", "INTEGER")
-        addColumn(connection, "WeatherAppEntryEntity", "tomorrowHourly", "TEXT")
-        connection.execSQL("CREATE TABLE IF NOT EXISTS `SendTextContactEntity` (`recordHashcode` INTEGER NOT NULL, `deleted` INTEGER NOT NULL, `sync` INTEGER NOT NULL DEFAULT 1, `contactId` TEXT NOT NULL, `name` TEXT NOT NULL, `methodsJson` TEXT NOT NULL, PRIMARY KEY(`contactId`))")
-        connection.execSQL("CREATE TABLE IF NOT EXISTS `SendTextContactSyncEntity` (`recordId` TEXT NOT NULL, `transport` TEXT NOT NULL, `watchSynchHashcode` INTEGER NOT NULL, PRIMARY KEY(`recordId`, `transport`), FOREIGN KEY(`recordId`) REFERENCES `SendTextContactEntity`(`contactId`) ON UPDATE CASCADE ON DELETE CASCADE )")
-        connection.execSQL("CREATE TABLE IF NOT EXISTS `SendTextCannedResponsesEntity` (`recordHashcode` INTEGER NOT NULL, `deleted` INTEGER NOT NULL, `sync` INTEGER NOT NULL DEFAULT 1, `source` TEXT NOT NULL, `responsesJson` TEXT NOT NULL, PRIMARY KEY(`source`))")
-        connection.execSQL("CREATE TABLE IF NOT EXISTS `SendTextCannedResponsesSyncEntity` (`recordId` TEXT NOT NULL, `transport` TEXT NOT NULL, `watchSynchHashcode` INTEGER NOT NULL, PRIMARY KEY(`recordId`, `transport`), FOREIGN KEY(`recordId`) REFERENCES `SendTextCannedResponsesEntity`(`source`) ON UPDATE CASCADE ON DELETE CASCADE )")
-    }
-
-    private fun addColumn(connection: SQLiteConnection, table: String, column: String, type: String) {
-        val present = connection.prepare("PRAGMA table_info(`$table`)").use { statement ->
-            var found = false
-            while (statement.step()) {
-                if (statement.getText(1) == column) found = true
-            }
-            found
-        }
-        if (!present) connection.execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $type")
-    }
-}
-
-// Additive migration: existing minute records retain all activity and heart-rate values.
-val MIGRATION_46_47 = object : Migration(46, 47) {
-    override fun migrate(connection: SQLiteConnection) {
-        connection.execSQL("ALTER TABLE health_data ADD COLUMN spo2Percent INTEGER NOT NULL DEFAULT 0")
-        connection.execSQL("ALTER TABLE health_data ADD COLUMN spo2Quality INTEGER NOT NULL DEFAULT 0")
-    }
-}

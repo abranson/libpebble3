@@ -114,7 +114,6 @@ kotlin {
             implementation(libs.sqlite.bundled)
             api(libs.kotlinx.io.core)
             implementation(libs.kotlinx.io.okio)
-            implementation(libs.coredevices.speex)
             implementation(libs.okio)
             implementation(libs.kable)
             implementation(libs.kmpio)
@@ -139,18 +138,23 @@ kotlin {
             implementation(libs.settings.test)
         }
 
+        androidMain { kotlin.srcDir("src/mobileMain/kotlin") }
+        iosMain { kotlin.srcDir("src/mobileMain/kotlin") }
         androidMain.dependencies {
+            implementation(libs.coredevices.speex)
             implementation(libs.androidx.core.ktx)
             implementation(libs.androidx.documentfile)
             implementation(libs.pebblekit)
         }
 
         iosMain.dependencies {
+            implementation(libs.coredevices.speex)
             implementation(libs.ktor.client.darwin)
             implementation(libs.ktor.websockets)
         }
 
         jvmMain.dependencies {
+            implementation("com.tianscar.javasound:javasound-speex:0.9.8")
             // Linux desktop GATT server + pairing/adapter state over BlueZ D-Bus.
             // (Kable's JVM/btleplug backend for the central role comes transitively via libs.kable.)
             implementation(libs.bluez.dbus)
@@ -251,3 +255,7 @@ dependencies {
         }
     }
 }*/
+
+tasks.named<ProcessResources>("jvmProcessResources") {
+    from("src/androidMain/assets/startup.js") { into("pkjs") }
+}

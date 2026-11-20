@@ -1,6 +1,8 @@
 package io.rebble.libpebblecommon.timeline
 
 import io.rebble.libpebblecommon.connection.Timeline
+import io.rebble.libpebblecommon.connection.endpointmanager.timeline.ActionOverrides
+import io.rebble.libpebblecommon.connection.endpointmanager.timeline.InternalActionHandler
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.database.dao.TimelinePinRealDao
 import io.rebble.libpebblecommon.database.dao.TimelineReminderRealDao
@@ -35,5 +37,17 @@ class TimelineApi(
         libPebbleCoroutineScope.launch {
             timelinePinRealDao.markForDeletion(pinUuid)
         }
+    }
+
+    override suspend fun insertOrReplace(reminder: TimelineReminder) {
+        timelineReminderRealDao.insertOrReplace(reminder)
+    }
+
+    override suspend fun deleteReminder(reminderUuid: Uuid) {
+        timelineReminderRealDao.markForDeletion(reminderUuid)
+    }
+
+    override fun setActionHandler(internalType: String, handler: InternalActionHandler) {
+        actionOverrides.internalActionHandlers[internalType] = handler
     }
 }

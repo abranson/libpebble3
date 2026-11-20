@@ -6,6 +6,8 @@ import io.rebble.libpebblecommon.connection.PebbleIdentifier
 import io.rebble.libpebblecommon.connection.PebbleProtocolHandler
 import io.rebble.libpebblecommon.connection.endpointmanager.CompanionAppLifecycleManager
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
+import io.rebble.libpebblecommon.plugin.PluginLogs
+import kotlinx.coroutines.CancellationException
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -18,7 +20,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -84,6 +91,15 @@ class DevConnectionManager(
     private val resumer: DevConnectionResumer,
     private val scope: ConnectionCoroutineScope
 ): ConnectedPebble.DevConnection {
+    private val logger = Logger.withTag("DevConnectionManager")
+    private val _devConnectionError = MutableStateFlow<String?>(null)
+    override val devConnectionError: StateFlow<String?> = _devConnectionError.asStateFlow()
+
+    fun init() {
+        val forceLan = resumer.active.value[identifier] ?: return
+        scope.launch { startDevConnection(forceLan) }
+    }
+
     private class ActiveRun(
         val lease: DevConnectionOwnershipCoordinator.Lease,
         val job: Job,
@@ -100,11 +116,14 @@ class DevConnectionManager(
             val acquisition = processDevConnectionOwnership.tryAcquire(this) ?: return@run
             if (!acquisition.acquired) return@run
 
+            _devConnectionError.value = null
+            resumer.active.update { it + (identifier to forceLan) }
             var publishedRun: ActiveRun? = null
             try {
-                val inboundPKJSLogs = companionAppLifecycleManager.currentPKJSSession.flatMapLatest {
-                    it?.logMessages?.receiveAsFlow() ?: emptyFlow()
-                }
+                val inboundPKJSLogs = merge(
+                    companionAppLifecycleManager.currentPKJSSession.flatMapLatest { it?.logMessages?.receiveAsFlow() ?: emptyFlow() },
+                    pluginLogs.messages,
+                )
                 val started = scope.launch(start = CoroutineStart.LAZY) {
                     var last: DevConnectionTransport? = null
                     try {
@@ -121,6 +140,11 @@ class DevConnectionManager(
                                 protocolHandler.send(message)
                             }
                         }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logger.e(e) { "Dev connection failed" }
+                        _devConnectionError.value = e.message ?: e::class.simpleName
                     } finally {
                         // Cancellation must not interrupt socket/websocket shutdown: global
                         // ownership remains held until this finally block has completed.
@@ -160,6 +184,8 @@ class DevConnectionManager(
         // same-owner lease as an idempotent active run and then get lost while stop finishes.
         // Completion callbacks do not acquire this gate, so joining here cannot deadlock them.
         transitionGate.run {
+            _devConnectionError.value = null
+            resumer.active.update { it - identifier }
             val stopping = run.value ?: return@run
             withContext(NonCancellable) {
                 stopping.job.cancelAndJoin()

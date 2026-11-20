@@ -10,7 +10,6 @@ actual val pkjsPlatformModule: Module = module {
     factory { params ->
         GraalJsRunner(
             appContext = get(),
-            libPebble = get(),
             jsTokenUtil = get(),
 
             device = params.get(),
@@ -25,6 +24,10 @@ actual val pkjsPlatformModule: Module = module {
             httpInterceptorManager = get(),
             notificationConfigFlow = get(),
             pluginRegistry = get(),
+            permissions = get(),
+            pluginClient = get(),
+            dataUsage = get(),
+            httpClient = get(),
         )
     } bind JsRunner::class
 }

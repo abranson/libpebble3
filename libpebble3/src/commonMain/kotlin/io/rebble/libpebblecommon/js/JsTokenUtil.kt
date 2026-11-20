@@ -18,7 +18,8 @@ import kotlin.uuid.Uuid
 class JsTokenUtil(
     private val tokenProvider: TokenProvider,
     private val lockerEntryDao: LockerEntryDao,
-    private val watchConfigFlow: WatchConfigFlow = WatchConfig().asFlow(),
+    private val watchConfigFlow: WatchConfigFlow,
+    private val permissions: AppPermissions,
     private val webServices: WebServices? = null,
 ): PKJSToken {
     companion object {
@@ -60,6 +61,7 @@ class JsTokenUtil(
     }
 
     suspend fun getTimelineToken(uuid: Uuid): String? {
+        if (permissions.request(uuid, PluginPermissions.TIMELINE, wait = true) != PermissionDecision.Granted) return null
         // Locker apps carry their own user_token; anything else (e.g. sideloaded) falls back to a
         // sandbox token, then to the emulator dummy if remote-timeline emulation is on.
         val session = webServices?.currentAccountSession()

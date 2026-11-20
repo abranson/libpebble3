@@ -115,6 +115,10 @@ class DevConnectionServer(
                                             logger.d { "Received InstallBundle message with payload size ${payload.size}" }
                                             send(InstallStatusMessage(installPBW(payload)))
                                         }
+                                        ClientMessageType.InstallFirmware -> {
+                                            logger.d { "Received InstallFirmware message with payload size ${payload.size}" }
+                                            installFirmware(identifier, payload, { send(PhoneAppLogMessage(it)) }, { send(InstallStatusMessage(it)) })
+                                        }
                                         ClientMessageType.PhoneInfo -> {
                                             send(PhoneInfoMessage())
                                         }

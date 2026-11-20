@@ -83,6 +83,29 @@ interface LockerEntryRealDao : LockerEntryDao {
     """)
     suspend fun getAll(): List<LockerEntry>
 
+    @Query("""
+        SELECT * FROM LockerEntryEntity WHERE deleted = 0 AND id IN (:ids)
+    """)
+    fun getEntriesFlow(ids: List<Uuid>): Flow<List<LockerEntry>>
+
+    @Query("""
+        UPDATE LockerEntryEntity
+        SET watchPermissions = :permissions, recordHashcode = :hashcode
+        WHERE id = :id AND watchPermissions != :permissions
+    """)
+    suspend fun updateWatchPermissions(id: Uuid, permissions: Int, hashcode: Int)
+
+    /** Apps missing from [permissions] have none. */
+    @Transaction
+    suspend fun syncWatchPermissions(permissions: Map<Uuid, Int>) {
+        getAll().forEach { entry ->
+            val bits = permissions[entry.id] ?: 0
+            if (entry.watchPermissions != bits) {
+                updateWatchPermissions(entry.id, bits, entry.copy(watchPermissions = bits).recordHashCode())
+            }
+        }
+    }
+
     @Query("SELECT * FROM LockerEntryEntity WHERE id = :id AND deleted = 0")
     suspend fun getStoredEntry(id: Uuid): LockerEntryEntity?
 
@@ -150,6 +173,7 @@ interface LockerEntryRealDao : LockerEntryDao {
     ) {
         val remoteIds = getRemoteAccountEntryIds()
         if (remoteIds.isNotEmpty()) {
+            clearRemoteAccountPermissions()
             markAllForDeletion(remoteIds)
             timelinePinDao.markAllForDeletionByParentIdsWithReminders(
                 remoteIds,
@@ -165,6 +189,13 @@ interface LockerEntryRealDao : LockerEntryDao {
         AND sideloaded = 0
     """)
     suspend fun getRemoteAccountEntryIds(): List<Uuid>
+
+    @Query("""
+        DELETE FROM AppPermission WHERE appUuid IN (
+            SELECT id FROM LockerEntryEntity WHERE systemApp = 0 AND sideloaded = 0
+        )
+    """)
+    suspend fun clearRemoteAccountPermissions()
 
     @Query("UPDATE LockerEntryEntity SET userToken = NULL")
     suspend fun clearAllUserTokens()

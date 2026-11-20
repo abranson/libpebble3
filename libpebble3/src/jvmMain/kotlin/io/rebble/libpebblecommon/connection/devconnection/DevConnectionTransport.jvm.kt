@@ -4,7 +4,7 @@ import io.rebble.libpebblecommon.util.JvmPaths
 import kotlinx.io.files.Path
 import java.util.UUID
 
-internal actual fun getTempPbwPath(): Path {
+internal actual fun getTempPath(extension: String): Path {
     val uuid = UUID.randomUUID().toString()
-    return Path(JvmPaths.cacheSubdir("devconnection").resolve("devconn-$uuid.pbw").toString())
+    return Path(JvmPaths.cacheSubdir("devconnection").resolve("devconn-$uuid.$extension").toString())
 }

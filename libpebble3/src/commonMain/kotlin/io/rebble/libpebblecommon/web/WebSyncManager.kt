@@ -37,6 +37,7 @@ class WebSyncManager(
                 }
                 locker.update(response, session)
                 result.complete(Unit)
+                locker.prefetchStaleAppUpdates()
             } catch (e: CancellationException) {
                 result.cancel(e)
                 throw e

@@ -401,6 +401,9 @@ class FakeLibPebble : LibPebble {
         // No-op
     }
 
+    override suspend fun createEvent(calendarId: Int, event: NewCalendarEvent): String? = null
+
+    override suspend fun defaultCalendar(): CalendarEntity? = null
     override suspend fun syncCalendars(beginCommit: () -> Boolean): CalendarSyncOutcome {
         if (!beginCommit()) throw CancellationException("calendar sync cancelled before commit")
         return CalendarSyncOutcome.Completed(
@@ -411,7 +414,6 @@ class FakeLibPebble : LibPebble {
         )
     }
 
-    override suspend fun createEvent(event: NewCalendarEvent): String? = null
 
     // OtherPebbleApps interface
     override fun otherPebbleCompanionAppsInstalled(): StateFlow<List<OtherPebbleApp>> =

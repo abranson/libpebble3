@@ -12,6 +12,7 @@ import io.rebble.libpebblecommon.database.entity.TimelineNotification
 import io.rebble.libpebblecommon.database.entity.TimelinePin
 import io.rebble.libpebblecommon.database.entity.TimelineReminder
 import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
+import io.rebble.libpebblecommon.packets.blobdb.TimelineAttribute
 import io.rebble.libpebblecommon.messaging.SendTextManager
 import io.rebble.libpebblecommon.packets.blobdb.TimelineIcon
 import io.rebble.libpebblecommon.packets.blobdb.TimelineItem
@@ -50,6 +51,8 @@ class TimelineActionManager(
     private val actionOverrides: ActionOverrides,
     private val pinDao: TimelinePinRealDao,
     private val reminderDao: TimelineReminderRealDao,
+    private val pluginRegistry: PluginRegistry,
+    private val pluginClient: PluginClient,
     private val sendTextManager: SendTextManager,
 ) {
     companion object {

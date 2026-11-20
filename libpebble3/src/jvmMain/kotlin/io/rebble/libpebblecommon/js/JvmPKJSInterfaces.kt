@@ -3,7 +3,9 @@ package io.rebble.libpebblecommon.js
 import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.NotificationConfigFlow
 import io.rebble.libpebblecommon.connection.AppContext
-import io.rebble.libpebblecommon.connection.LibPebble
+import io.rebble.libpebblecommon.permissions.AppPermissions
+import io.rebble.libpebblecommon.plugin.PluginClient
+import io.rebble.libpebblecommon.plugin.PluginRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -16,12 +18,12 @@ import kotlin.coroutines.cancellation.CancellationException
 internal class JvmPKJSInterface(
     jsRunner: JsRunner,
     device: CompanionAppDevice,
-    libPebble: LibPebble,
+    remoteTimelineEmulator: RemoteTimelineEmulator,
     jsTokenUtil: JsTokenUtil,
-) : PKJSInterface(jsRunner, device, libPebble, jsTokenUtil), JvmJsInterface {
+) : PKJSInterface(jsRunner, device, remoteTimelineEmulator, jsTokenUtil), JvmJsInterface {
     private val logger = Logger.withTag("JvmPKJSInterface")
     override val name = "Pebble"
-    override val methods = setOf(
+    override val methods = listOf(
         "showSimpleNotificationOnPebble", "getAccountToken", "getWatchToken", "showToast",
         "openURL",
     )
@@ -52,15 +54,18 @@ internal class JvmPrivatePKJSInterface(
     remoteTimelineEmulator: RemoteTimelineEmulator,
     httpInterceptorManager: HttpInterceptorManager,
     notificationConfigFlow: NotificationConfigFlow,
-    pluginRegistry: io.rebble.libpebblecommon.plugin.PluginRegistry,
+    pluginRegistry: PluginRegistry,
+    permissions: AppPermissions,
+    pluginClient: PluginClient,
 ) : PrivatePKJSInterface(
     jsRunner, device, scope, outgoingAppMessages, logMessages, jsTokenUtil,
     remoteTimelineEmulator, httpInterceptorManager, notificationConfigFlow, pluginRegistry,
+    permissions, pluginClient,
 ), JvmJsInterface {
     private val logger = Logger.withTag("JvmPrivatePKJSInterface")
     override val name = "_Pebble"
-    override val methods = setOf(
-        "subscribeToSource", "unsubscribeSource", "invokeAction", "configMessageReply", "sendConfigMessage", "enumeratePlugins",
+    override val methods = listOf(
+        "subscribeToSource", "unsubscribeSource", "invokeAction", "queryPermission", "configMessageReply", "sendConfigMessage", "enumeratePlugins",
         "sendAppMessageString", "privateLog", "onConsoleLog", "onError",
         "onUnhandledRejection", "logInterceptedSend", "getVersionCode",
         "getTimelineTokenAsync", "privateFnConfirmReadySignal", "getActivePebbleWatchInfo",
@@ -73,6 +78,7 @@ internal class JvmPrivatePKJSInterface(
         "subscribeToSource" -> subscribeToSource((args[0] as Number).toInt(), args[1].toString())
         "unsubscribeSource" -> unsubscribeSource((args[0] as Number).toInt())
         "invokeAction" -> invokeAction((args[0] as Number).toInt(), args[1].toString())
+        "queryPermission" -> queryPermission((args[0] as Number).toInt(), args[1].toString())
         "configMessageReply" -> configMessageReply((args[0] as Number).toInt(), args[1].toString())
         "sendConfigMessage" -> sendConfigMessage(args[0].toString())
         "enumeratePlugins" -> enumeratePlugins()
@@ -127,7 +133,7 @@ internal class JvmLocalStorageInterface(
     appContext: AppContext,
 ) : JSLocalStorageInterface(scopedSettingsUuid, appContext), JvmJsInterface {
     override val name = "localStorage"
-    override val methods = setOf("getItem", "setItem", "removeItem", "clear", "key")
+    override val methods = listOf("getItem", "setItem", "removeItem", "clear", "key")
 
     private var evalNow: ((String) -> Unit)? = null
 
@@ -163,51 +169,13 @@ internal class JvmLocalStorageInterface(
     }
 }
 
-/** JS global `_PebbleGeo`; startup.js builds navigator.geolocation on top of it. */
-internal class JvmGeolocationInterface(
-    scope: CoroutineScope,
-    jsRunner: JsRunner,
-) : GeolocationInterface(scope, jsRunner), JvmJsInterface {
-    override val name = "_PebbleGeo"
-    override val methods = setOf(
-        "getCurrentPosition", "watchPosition", "clearWatch",
-        "getRequestCallbackID", "getWatchCallbackID",
-    )
-
-    override fun dispatch(method: String, args: List<Any?>): Any? {
-        fun num(i: Int) = args.getOrNull(i) as? Number
-        return when (method) {
-            "getCurrentPosition" -> {
-                val id = num(0)?.toDouble() ?: return null
-                getCurrentPosition(
-                    id,
-                    num(1)?.toDouble() ?: -1.0,
-                    num(2)?.toDouble() ?: -1.0,
-                    num(3)?.toDouble() ?: 0.0,
-                )
-            }
-            "watchPosition" -> {
-                val id = num(0)?.toDouble() ?: return null
-                watchPosition(id, num(1)?.toDouble() ?: 500.0, num(2)?.toDouble() ?: 0.0)
-            }
-            "clearWatch" -> {
-                num(0)?.toInt()?.let { clearWatch(it) }
-                null
-            }
-            "getRequestCallbackID" -> getRequestCallbackID()
-            "getWatchCallbackID" -> getWatchCallbackID()
-            else -> null
-        }
-    }
-}
-
 /** JS global `_Timeout` — JSTimeout.js owns the callback maps; Kotlin owns the clocks. */
 internal class JsTimeout(
     private val scope: CoroutineScope,
     private val eval: (String) -> Unit,
 ) : JvmJsInterface {
     override val name = "_Timeout"
-    override val methods = setOf("setTimeout", "setInterval", "clearTimeout", "clearInterval")
+    override val methods = listOf("setTimeout", "setInterval", "clearTimeout", "clearInterval")
 
     private val jobs = mutableMapOf<Int, kotlinx.coroutines.Job>()
     private var lastId = 0
@@ -223,7 +191,8 @@ internal class JsTimeout(
             val delayMs = (args[0] as Number).toDouble()
             val id = nextId()
             jobs[id] = scope.launch {
-                delay(delayMs.toLong())
+                delay(delayMs.toLong().coerceAtLeast(1))
+                jobs.remove(id)
                 if (isActive) eval("_LibPebbleTriggerTimeout(${id.toDouble()})")
             }
             id.toDouble()
@@ -233,7 +202,7 @@ internal class JsTimeout(
             val id = nextId()
             jobs[id] = scope.launch {
                 while (isActive) {
-                    delay(delayMs.toLong())
+                    delay(delayMs.toLong().coerceAtLeast(1))
                     eval("_LibPebbleTriggerInterval(${id.toDouble()})")
                 }
             }

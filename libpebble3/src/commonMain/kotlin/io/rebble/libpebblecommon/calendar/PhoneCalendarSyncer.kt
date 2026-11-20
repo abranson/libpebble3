@@ -169,6 +169,7 @@ class PhoneCalendarSyncer(
                 color = sourceCalendar.color,
                 syncEvents = sourceCalendar.syncEvents,
                 visible = sourceCalendar.visible,
+                writable = sourceCalendar.writable,
             ) ?: sourceCalendar.inheritEnabledFrom(removedCalendars)
         }
         logger.d(

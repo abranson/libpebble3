@@ -75,7 +75,7 @@ fun parseStepsData(payload: ByteArray, itemSize: UShort): List<HealthDataEntity>
         for (j in 0 until recordNum.toInt()) {
             val sampleStart = buffer.readPosition
             val itemRemaining = itemStart + itemSize.toInt() - sampleStart
-            if (itemRemaining < maxOf(sampleSize, minimumSampleSize)) {
+            if (sampleSize < minimumSampleSize || itemRemaining < sampleSize) {
                 logger.w { "Buffer exhausted during steps parsing at record $j/$recordNum in packet $i" }
                 break
             }

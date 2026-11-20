@@ -51,6 +51,8 @@ class RemoteTimelineEmulator(
     private val json: Json,
     private val timelinePinRealDao: TimelinePinRealDao,
     private val timelineReminderRealDao: TimelineReminderRealDao,
+    private val timelineNotificationRealDao: TimelineNotificationRealDao,
+    private val permissions: AppPermissions,
     private val locker: Locker,
 ) : HttpInterceptor {
     override val servedLocally = true
@@ -121,9 +123,12 @@ class RemoteTimelineEmulator(
                 logger.w { "insert pin == null" }
                 return@mutateForLiveLockerApp
             }
-            // TODO create/update notifications
             logger.v { "inserting pin ${timelinePin.itemId} (${pin.id})" }
             timelinePinRealDao.insertOrReplace(timelinePin)
+            pin.notificationFor(existingPin, timelinePin)
+                ?.takeIf { mayShowNotifications(appUuid) }
+                ?.let { asNotification(it, appUuid) }
+                ?.let { timelineNotificationRealDao.insertOrReplace(it) }
             timelineReminderRealDao.markForDeletionByParentId(timelinePin.itemId)
             pin.reminders?.forEach { reminder ->
                 val timelineReminder = asReminder(jsonReminder = reminder, pinUuid = pinUuid)

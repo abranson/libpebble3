@@ -53,7 +53,8 @@ internal class JvmSystemCalendar : SystemCalendar {
     override suspend fun enableSyncForCalendar(calendar: CalendarEntity) {}
     override fun registerForCalendarChanges(): Flow<Unit>? = null
     override fun hasPermission(): Boolean = false
-    override suspend fun createEvent(event: NewCalendarEvent): String? = null
+    override suspend fun createEvent(calendarId: String, event: NewCalendarEvent): String? = null
+    override suspend fun defaultCalendarPlatformId(): String? = null
     override fun supportsPinActions(): Boolean = false
 }
 
