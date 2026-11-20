@@ -1410,6 +1410,7 @@ fun AppImage(entry: CommonApp, modifier: Modifier, size: Dp) {
 
             is CommonAppType.System -> {
                 val resUri = when (entry.commonAppType.app) {
+                    SystemApps.SendText -> return@remember null
                     SystemApps.Settings -> "drawable/settings.png"
                     SystemApps.Music -> "drawable/music.png"
                     SystemApps.Notifications -> "drawable/notifications.png"
