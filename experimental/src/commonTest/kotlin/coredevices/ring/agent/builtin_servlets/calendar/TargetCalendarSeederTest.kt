@@ -10,6 +10,7 @@ import coredevices.util.PermissionResult
 import coredevices.util.RequiredPermissions
 import io.rebble.libpebblecommon.calendar.NewCalendarEvent
 import io.rebble.libpebblecommon.connection.Calendar
+import io.rebble.libpebblecommon.connection.CalendarSyncOutcome
 import io.rebble.libpebblecommon.database.entity.CalendarEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -34,6 +35,7 @@ class TargetCalendarSeederTest {
         private val calendars: List<CalendarEntity>,
         private val default: CalendarEntity?,
     ) : Calendar {
+        override suspend fun syncCalendars(beginCommit: () -> Boolean) = CalendarSyncOutcome.SourceUnavailable
         override fun calendars(): Flow<List<CalendarEntity>> = flowOf(calendars)
         override fun updateCalendarEnabled(calendarId: Int, enabled: Boolean) {}
         override suspend fun createEvent(calendarId: Int, event: NewCalendarEvent): String? = null
