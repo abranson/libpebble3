@@ -3,6 +3,7 @@ package io.rebble.libpebblecommon.locker
 import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.ErrorTracker
 import io.rebble.libpebblecommon.connection.UserFacingError
+import io.rebble.libpebblecommon.connection.StoreLockerSession
 import io.rebble.libpebblecommon.connection.WebAccountSession
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.database.Database
@@ -28,7 +29,7 @@ internal class LockerAppRemoval(
         var storeLinkedSideload = false
         var localCoreApp = false
         val remoteSession = accountMutations.mutateWithSession(
-            webSession = webServices::currentAccountSession,
+            webSession = webServices::currentLockerSession,
         ) { capturedSession ->
             val lockerEntry = lockerEntryDao.getEntry(id)
             if (lockerEntry == null) {
@@ -43,7 +44,8 @@ internal class LockerAppRemoval(
             // Store PBWs may be imported locally before being added to the account locker.
             // Removing just that local override would let the following sync restore the app.
             val storeId = lockerEntry.appstoreData?.storeId
-            localCoreApp = storeId?.startsWith(CORE_STORE_ID_PREFIX) == true
+            localCoreApp = storeId?.startsWith(CORE_STORE_ID_PREFIX) == true &&
+                capturedSession.webSession !is StoreLockerSession
             storeLinkedSideload = lockerEntry.sideloaded && !localCoreApp &&
                 !storeId.isNullOrBlank() && capturedSession.webSession != null
             if (localCoreApp || (lockerEntry.sideloaded && !storeLinkedSideload)) {
@@ -63,7 +65,9 @@ internal class LockerAppRemoval(
             // account or commit into its local locker.
             val removedRemotely = when (val webSession = remoteSession.webSession) {
                 null -> if (webServices.usesAccountSessions()) false else webServices.removeFromLocker(id)
-                else -> if (storeLinkedSideload) {
+                else -> if (webSession is StoreLockerSession) {
+                    webServices.removeFromLocker(id, webSession)
+                } else if (storeLinkedSideload) {
                     removeStoreLinkedSideload(id, webSession)
                 } else {
                     webServices.removeFromLocker(id, webSession)
@@ -82,7 +86,7 @@ internal class LockerAppRemoval(
                 when {
                     current == null -> true // A concurrent same-session remove already committed.
                     current.systemApp || current.sideloaded != storeLinkedSideload ||
-                        current.appstoreData?.storeId?.startsWith(CORE_STORE_ID_PREFIX) == true -> false
+                        (remoteSession.webSession !is StoreLockerSession && current.appstoreData?.storeId?.startsWith(CORE_STORE_ID_PREFIX) == true) -> false
                     else -> {
                         lockerEntryDao.markForDeletionWithTimeline(
                             id,

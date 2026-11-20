@@ -379,6 +379,8 @@ interface WebServices {
      */
     fun currentAccountSession(): WebAccountSession? = null
 
+    fun currentLockerSession(): WebAccountSession? = currentAccountSession()
+
     /** Return whether [session] still identifies the implementation's current account. */
     fun isCurrentAccountSession(session: WebAccountSession): Boolean = false
 
@@ -424,6 +426,11 @@ interface WebServices {
  * not expose them from [Any.toString] or diagnostics.
  */
 interface WebAccountSession
+
+/** A selected cloud locker can contain apps originally installed from another store. */
+interface StoreLockerSession : WebAccountSession {
+    val coreLocker: Boolean
+}
 
 interface TokenProvider {
     suspend fun getDevToken(): String?
@@ -563,6 +570,9 @@ interface LockerApi {
         apps: List<LockerEntry>,
         session: WebAccountSession,
     ): Boolean = false
+
+    /** Serialize locker selection with local commits from the previously active store. */
+    suspend fun transitionLockerSelection(commit: () -> Boolean): Boolean = commit()
 
     /**
      * Retire cloud-owned locker state before atomically publishing replacement account

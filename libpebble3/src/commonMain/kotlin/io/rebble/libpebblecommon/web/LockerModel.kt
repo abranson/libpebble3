@@ -20,6 +20,8 @@ data class LockerModelWrapper(
     val failedToFetchUuids: Set<Uuid>,
     /** The user's decisions from other devices and the web store, by app; newest wins. */
     val permissions: Map<Uuid, Map<String, PermissionDecisionRecord>> = emptyMap(),
+    /** Switching lockers must not replace or uninstall existing builds. */
+    val preserveInstalledBuilds: Boolean = false,
 )
 
 @Serializable

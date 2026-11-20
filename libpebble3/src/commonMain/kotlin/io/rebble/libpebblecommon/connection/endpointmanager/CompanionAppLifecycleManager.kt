@@ -124,7 +124,7 @@ class CompanionAppLifecycleManager(
     ): List<CompanionApp> {
         return buildList {
             val pkjsApp = if (pbw.hasPKJS) {
-                val jsPath = lockerPBWCache.getPKJSFileForApp(lockerEntry.id, lockerEntry.version)
+                val jsPath = lockerPBWCache.getPKJSFileForApp(lockerEntry.id, lockerEntry.version, lockerEntry.appstoreData?.storeId)
                 PKJSApp(
                     device,
                     jsPath,

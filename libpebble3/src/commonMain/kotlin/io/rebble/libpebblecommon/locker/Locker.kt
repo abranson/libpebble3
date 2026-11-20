@@ -19,6 +19,7 @@ import io.rebble.libpebblecommon.connection.LockerApi
 import io.rebble.libpebblecommon.connection.PebbleIdentifier
 import io.rebble.libpebblecommon.connection.UserFacingError
 import io.rebble.libpebblecommon.connection.WatchManager
+import io.rebble.libpebblecommon.connection.StoreLockerSession
 import io.rebble.libpebblecommon.connection.WebAccountSession
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.connection.endpointmanager.blobdb.TimeProvider
@@ -229,7 +230,7 @@ class Locker(
         return combine(permissions.statuses(id), lockerEntryDao.getEntryFlow(id)) { statuses, entry ->
             statuses.takeIf {
                 it.isNotEmpty() || entry == null || entry.systemApp ||
-                    lockerPBWCache.cachedPBWFileForApp(id, entry.version) != null
+                    lockerPBWCache.cachedPBWFileForApp(id, entry.version, entry.appstoreData?.storeId) != null
             }
         }.flowOn(Dispatchers.IO)
     }
@@ -280,6 +281,9 @@ class Locker(
     override suspend fun setAppOrder(orderedIds: List<Uuid>): Boolean =
         lockerEntryDao.setOrder(orderedIds, config.value.lockerSyncLimitV2)
 
+    override suspend fun transitionLockerSelection(commit: () -> Boolean): Boolean =
+        accountMutations.transition { commit() }
+
     override suspend fun transitionAccount(commitCredentials: () -> Boolean): Boolean =
         accountMutations.transition {
             withContext(NonCancellable) {
@@ -296,7 +300,7 @@ class Locker(
         }
 
     internal suspend fun captureRemoteAccountSession(): LockerRemoteAccountSession =
-        accountMutations.capture(webServices::currentAccountSession)
+        accountMutations.capture(webServices::currentLockerSession)
 
     /** Serialize an app-owned side effect with removal/account retirement and reject stale apps. */
     internal suspend fun mutateForLiveLockerApp(
@@ -403,7 +407,7 @@ class Locker(
     /** For apps whose pbws were fetched before their appinfo was recorded, and won't be fetched again. */
     private suspend fun backfillAppInfo() {
         lockerEntryDao.getAll().filterNot { it.systemApp }.forEach { entry ->
-            val pbw = lockerPBWCache.cachedPBWFileForApp(entry.id, entry.version) ?: return@forEach
+            val pbw = lockerPBWCache.cachedPBWFileForApp(entry.id, entry.version, entry.appstoreData?.storeId) ?: return@forEach
             try {
                 recordAppInfo(entry.id, entry.version, pbw)
             } catch (e: CancellationException) {
@@ -520,15 +524,33 @@ class Locker(
             mergeDecisions(locker.permissions)
             val existingApps = lockerEntryDao.getAll().associateBy { it.id }.toMutableMap()
             val sideloaded = existingApps.values.filter { it.sideloaded }.map { it.id }.toSet()
+            val preserved = mutableSetOf<Uuid>()
             val previousVersions = existingApps.mapValues { it.value.version }
             val toInsert = locker.locker.applications.mapNotNull { new ->
-                val newEntity = new.asEntity(orderIndexForInsert(AppType.fromString(new.type) ?: AppType.Watchface))
+                // Append restored entries so a full watch keeps its existing sync slots.
+                val order = if (locker.preserveInstalledBuilds) Int.MAX_VALUE else
+                    orderIndexForInsert(AppType.fromString(new.type) ?: AppType.Watchface)
+                val newEntity = new.asEntity(order)
                 // Preferred source for this UUID failed this sync; don't downgrade existing entry
                 // to a fallback source's (potentially older) entry. Leave the DB row alone.
                 if (newEntity.id in locker.failedToFetchUuids) return@mapNotNull null
                 val existing = existingApps.remove(newEntity.id)
+                if (locker.preserveInstalledBuilds && existing != null) {
+                    preserved += existing.id
+                    // Only the actual Rebble locker can refresh a Rebble timeline token.
+                    // Keep the installed version, binaries, permissions and order.
+                    val data = existing.appstoreData
+                    val token = newEntity.appstoreData?.userToken
+                    if (token != null && data != null && data.storeId == newEntity.appstoreData?.storeId &&
+                        data.userToken != token
+                    ) return@mapNotNull existing.copy(appstoreData = data.copy(userToken = token))
+                    return@mapNotNull null
+                }
                 if (existing == null) {
-                    newEntity
+                    // Core imports belong to the local watch library. A later change of
+                    // Rebble credentials must only retire rows owned by the Rebble account.
+                    if ((session.webSession as? StoreLockerSession)?.coreLocker == true)
+                        newEntity.copy(sideloaded = true) else newEntity
                 } else {
                     val newWithExistingLocalProps = newEntity.copy(
                         orderIndex = existing.orderIndex,
@@ -547,6 +569,7 @@ class Locker(
             logger.v { "Failed to fetch: ${locker.failedToFetchUuids}" }
             val toDelete = existingApps.mapNotNull {
                 when {
+                    locker.preserveInstalledBuilds -> null
                     it.value.sideloaded -> null
                     it.value.systemApp -> null
                     // Don't delete from locker if we just failed to fetch updated version
@@ -563,7 +586,7 @@ class Locker(
                 timelineReminderDao = timelineReminderDao,
             )
             recordRequestedPermissions(
-                locker.locker.applications.filter { Uuid.parse(it.uuid).let { id -> id !in sideloaded && id !in locker.failedToFetchUuids } },
+                locker.locker.applications.filter { Uuid.parse(it.uuid).let { id -> id !in preserved && id !in sideloaded && id !in locker.failedToFetchUuids } },
                 changed = toInsert.filter { previousVersions[it.id] != it.version }.map { it.id }.toSet(),
             )
             deleteAppData(toDelete)
@@ -623,13 +646,18 @@ class Locker(
                     } else metadata,
                 )
             }
+            // For an equal-version switch the database commit selects the new archive.
+            // A crash before that commit leaves the old source and payload usable.
+            val sameVersionSource = storeMetadata?.appstoreData?.storeId?.takeIf {
+                upgrade != null && upgrade.version == lockerEntry.version && upgrade.storeId != it
+            }
             pbwApp.source().buffered().use { source ->
                 if (upgrade == null) {
                     lockerPBWCache.deleteApp(lockerEntry.id)  // Clear old version(s) if re-sideloading.
                     lockerPBWCache.addPBWFileForApp(lockerEntry.id, lockerEntry.version, source)
                 } else {
                     // Keep the working PBW until the replacement has been copied and installed.
-                    lockerPBWCache.replacePbwAtomically(lockerEntry.id, lockerEntry.version, source)
+                    lockerPBWCache.replacePbwAtomically(lockerEntry.id, lockerEntry.version, source, sameVersionSource)
                     lockerPBWCache.clearPKJSFileForApp(lockerEntry.id)
                 }
             }
@@ -653,7 +681,7 @@ class Locker(
                 permissions.recordRequested(lockerEntry.id, pbwApp.requestedPermissions())
                 permissions.setDecisions(lockerEntry.id, granted)
                 if (upgrade != null) {
-                    runCatching { lockerPBWCache.deleteOtherVersions(lockerEntry.id, lockerEntry.version) }
+                    runCatching { lockerPBWCache.deleteOtherVersions(lockerEntry.id, lockerEntry.version, sameVersionSource) }
                         .onFailure { logger.w(it) { "Could not clean up previous PBWs for ${lockerEntry.id}" } }
                 }
                 performCacheCleanup()
@@ -1085,6 +1113,17 @@ abstract class LockerPBWCache(private val context: AppContext) {
         return Path(cacheDir, "${appId}_${version}.pbw")
     }
 
+    private fun buildPath(appId: Uuid, version: String, storeId: String?): Path {
+        // Only canonical listing IDs can become filename components. Old files use
+        // the UUID and release alone and remain readable.
+        val bare = storeId?.removePrefix("core:")
+        if (bare == null || bare.length != 24 || !bare.all { it in "0123456789abcdefABCDEF" }) {
+            return pathForApp(appId, version)
+        }
+        val store = if (storeId.startsWith("core:")) "core" else "rebble"
+        return Path(cacheDir, "${appId}@${store}-${bare.lowercase()}_${version}.pbw")
+    }
+
     protected fun pkjsPathForApp(appId: Uuid): Path {
         SystemFileSystem.createDirectories(pkjsCacheDir, false)
         return Path(pkjsCacheDir, "$appId.js")
@@ -1093,12 +1132,12 @@ abstract class LockerPBWCache(private val context: AppContext) {
     protected abstract suspend fun handleCacheMiss(appId: Uuid, version: String, locker: Locker): Path?
 
     suspend fun getPBWFileForApp(appId: Uuid, version: String, locker: Locker): Path {
-        val pbwPath = pathForApp(appId, version)
-        return if (SystemFileSystem.exists(pbwPath)) {
+        val pbwPath = cachedPBWFileForApp(appId, version, locker.getApp(appId)?.appstoreData?.storeId)
+        return if (pbwPath != null) {
             pbwPath
         } else {
-            // Delete any other cached versions for this app
-            deleteApp(appId)
+            // A replacement may be staged under a different source. Read misses
+            // must not discard the payload of an install which is about to commit.
             val fetched = handleCacheMiss(appId, version, locker) ?: error("Failed to find PBW file for app $appId")
             try {
                 locker.recordAppInfo(appId, version, fetched)
@@ -1111,8 +1150,9 @@ abstract class LockerPBWCache(private val context: AppContext) {
         }
     }
 
-    fun cachedPBWFileForApp(appId: Uuid, version: String): Path? =
-        pathForApp(appId, version).takeIf { SystemFileSystem.exists(it) }
+    fun cachedPBWFileForApp(appId: Uuid, version: String, storeId: String? = null): Path? =
+        buildPath(appId, version, storeId).takeIf { SystemFileSystem.exists(it) }
+            ?: pathForApp(appId, version).takeIf { SystemFileSystem.exists(it) }
 
     /** Every cached pbw version on disk, grouped by app-uuid string, parsed from `${uuid}_${version}.pbw`. */
     fun allCachedVersions(): Map<String, List<String>> {
@@ -1123,7 +1163,7 @@ abstract class LockerPBWCache(private val context: AppContext) {
             // The uuid has no underscores, so the first one separates it from the version.
             val sep = name.indexOf('_')
             if (sep <= 0) return@mapNotNull null
-            name.substring(0, sep) to name.substring(sep + 1).removeSuffix(".pbw")
+            name.substring(0, sep).substringBefore('@') to name.substring(sep + 1).removeSuffix(".pbw")
         }.groupBy({ it.first }, { it.second })
     }
 
@@ -1134,8 +1174,8 @@ abstract class LockerPBWCache(private val context: AppContext) {
         }
     }
 
-    internal fun replacePbwAtomically(appId: Uuid, version: String, source: Source) {
-        val destination = pathForApp(appId, version)
+    internal fun replacePbwAtomically(appId: Uuid, version: String, source: Source, storeId: String? = null) {
+        val destination = buildPath(appId, version, storeId)
         val temporary = Path(cacheDir, ".upgrade-${Uuid.random()}.tmp")
         try {
             SystemFileSystem.sink(temporary).use { source.transferTo(it) }
@@ -1145,10 +1185,10 @@ abstract class LockerPBWCache(private val context: AppContext) {
         }
     }
 
-    internal fun deleteOtherVersions(appId: Uuid, version: String) {
-        val current = pathForApp(appId, version)
+    internal fun deleteOtherVersions(appId: Uuid, version: String, storeId: String? = null) {
+        val current = buildPath(appId, version, storeId)
         SystemFileSystem.list(cacheDir)
-            .filter { it.name.startsWith("${appId}_") && it.name.endsWith(".pbw") && it.name != current.name }
+            .filter { (it.name.startsWith("${appId}_") || it.name.startsWith("${appId}@")) && it.name.endsWith(".pbw") && it.name != current.name }
             .forEach { SystemFileSystem.delete(it) }
     }
 
@@ -1157,14 +1197,16 @@ abstract class LockerPBWCache(private val context: AppContext) {
         return js.replace("\u00a0", " ")
     }
 
-    fun getPKJSFileForApp(appId: Uuid, version: String): Path {
-        val pkjsPath = pkjsPathForApp(appId)
-        val appPath = pathForApp(appId, version)
+    fun getPKJSFileForApp(appId: Uuid, version: String, storeId: String? = null): Path {
+        val appPath = cachedPBWFileForApp(appId, version, storeId) ?: pathForApp(appId, version)
+        val pkjsPath = if (appPath.name.startsWith("${appId}@")) {
+            Path(pkjsCacheDir, appPath.name.removeSuffix(".pbw") + ".js")
+        } else pkjsPathForApp(appId)
         return when {
             SystemFileSystem.exists(pkjsPath) -> pkjsPath
             SystemFileSystem.exists(appPath) -> {
                 SystemFileSystem.createDirectories(pkjsCacheDir, false)
-                val pbwApp = PbwApp(pathForApp(appId, version))
+                val pbwApp = PbwApp(appPath)
                 pbwApp.getPKJSFile().use { source ->
                     val js = sanitizeJS(source.readString())
                     SystemFileSystem.sink(pkjsPath).buffered().use { sink ->
@@ -1180,9 +1222,9 @@ abstract class LockerPBWCache(private val context: AppContext) {
 
     fun clearPKJSFileForApp(appId: Uuid) {
         val pkjsPath = pkjsPathForApp(appId)
-        if (SystemFileSystem.exists(pkjsPath)) {
-            SystemFileSystem.delete(pkjsPath)
-        }
+        SystemFileSystem.delete(pkjsPath, mustExist = false)
+        SystemFileSystem.list(pkjsCacheDir).filter { it.name.startsWith("${appId}@") && it.name.endsWith(".js") }
+            .forEach { SystemFileSystem.delete(it) }
     }
 
     fun deleteApp(appId: Uuid) {
