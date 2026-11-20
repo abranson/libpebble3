@@ -39,13 +39,15 @@ object RebbleAppstore {
     /** A downloaded pbw plus the app's UUID (needed to add it to the Rebble locker). */
     data class DownloadedApp(val path: Path, val uuid: String?, val storeMetadata: StorePbwMetadata)
 
-    suspend fun downloadPbw(storeId: String): DownloadedApp? {
+    suspend fun downloadPbw(storeId: String): DownloadedApp? =
+        downloadPbw(storeId, File(JvmPaths.cacheSubdir("appstore").toFile(), "$storeId.pbw"))
+
+    suspend fun downloadPbw(storeId: String, destination: File): DownloadedApp? {
         val record = lookupApp(storeId) ?: return null
         val pbwUrl = record.latestRelease?.pbwFile ?: run {
             logger.w { "no pbw for store id $storeId" }
             return null
         }
-        val dest = File(JvmPaths.cacheSubdir("appstore").toFile(), "$storeId.pbw")
         return try {
             val response = httpClient.get(pbwUrl) {
                 timeout {
@@ -57,9 +59,9 @@ object RebbleAppstore {
                 logger.w { "pbw download failed: ${response.status}" }
                 return null
             }
-            dest.outputStream().use { response.bodyAsChannel().copyTo(it) }
-            logger.d { "downloaded $pbwUrl to $dest" }
-            DownloadedApp(Path(dest.absolutePath), record.uuid, record.storeMetadata(storeId))
+            destination.outputStream().use { response.bodyAsChannel().copyTo(it) }
+            logger.d { "downloaded $pbwUrl to $destination" }
+            DownloadedApp(Path(destination.absolutePath), record.uuid, record.storeMetadata(storeId))
         } catch (e: Exception) {
             e.rethrowCancellation()
             logger.w { "pbw download failed: ${e.message}" }

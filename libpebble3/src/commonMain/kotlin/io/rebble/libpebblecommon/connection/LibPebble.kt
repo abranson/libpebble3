@@ -82,6 +82,10 @@ import io.rebble.libpebblecommon.plugin.PluginErrors
 import io.rebble.libpebblecommon.plugin.PluginMetadata
 import io.rebble.libpebblecommon.plugin.PluginOAuthApi
 import io.rebble.libpebblecommon.plugin.SourceUpdate
+import io.rebble.libpebblecommon.permissions.PermissionDecision
+import io.rebble.libpebblecommon.permissions.fileScopeOf
+import io.rebble.libpebblecommon.plugin.PluginPermissions
+import io.rebble.libpebblecommon.plugin.files.FileAccessMode
 import io.rebble.libpebblecommon.plugin.files.PluginFileAccess
 import io.rebble.libpebblecommon.plugin.files.PluginFileAccessApi
 import io.rebble.libpebblecommon.services.DailySleep
@@ -510,6 +514,8 @@ interface LockerApi {
         storeMetadata: StorePbwMetadata,
         loadOnWatch: Boolean = true,
     ): Boolean
+    /** Import a reviewed store package, preserving both its store identity and permission choices. */
+    suspend fun sideloadApp(pbwPath: Path, storeMetadata: StorePbwMetadata, granted: Map<String, Boolean?>): Boolean
     /** Associate an unlinked sideloaded app without changing its binary, version or order. */
     suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean
     fun getAllLockerBasicInfo(): Flow<List<AppBasicProperties>>
@@ -671,7 +677,7 @@ class LibPebble3(
     private val appDataUsage: AppDataUsage,
     pluginActionLog: PluginActionLog,
     pluginClient: PluginClient,
-    pluginFileAccess: PluginFileAccess,
+    private val pluginFileAccess: PluginFileAccess,
     private val notificationReplies: NotificationReplies,
     private val respectDoNotDisturbMigrator: RespectDoNotDisturbMigrator,
     private val sendTextManager: SendTextManager,
@@ -749,6 +755,31 @@ class LibPebble3(
             changed = true
         }
         return changed
+    }
+
+    suspend fun grantInstalledAppFolder(id: Uuid, scope: String, mode: FileAccessMode, handle: String): Boolean {
+        var granted = false
+        locker.mutateForLiveLockerApp(id) {
+            if (locker.getApp(id)?.systemApp != false) return@mutateForLiveLockerApp
+            val bare = if (mode == FileAccessMode.Read) PluginPermissions.READ_FILES else PluginPermissions.WRITE_FILES
+            if (locker.appPermissionStatuses(id).first().orEmpty().none { it.permission == bare } ||
+                pluginFileAccess.checkFilePermission(id, mode) != PermissionDecision.Granted) return@mutateForLiveLockerApp
+            granted = pluginFileAccess.grantFile(id, scope, mode, handle, replaceMode = true) != null
+        }
+        return granted
+    }
+
+    suspend fun revokeInstalledAppFolder(id: Uuid, scope: String): Boolean {
+        var revoked = false
+        locker.mutateForLiveLockerApp(id) {
+            if (locker.getApp(id)?.systemApp != false ||
+                locker.appPermissionStatuses(id).first().orEmpty().none { fileScopeOf(it.permission) == scope }) {
+                return@mutateForLiveLockerApp
+            }
+            pluginFileAccess.revokePluginFile(id, scope)
+            revoked = true
+        }
+        return revoked
     }
 
     override fun init() {

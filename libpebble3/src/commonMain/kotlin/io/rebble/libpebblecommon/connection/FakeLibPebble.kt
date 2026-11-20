@@ -213,6 +213,10 @@ class FakeLibPebble : LibPebble {
         loadOnWatch: Boolean,
     ): Boolean = sideloadApp(pbwPath, loadOnWatch)
 
+    override suspend fun sideloadApp(
+        pbwPath: Path, storeMetadata: StorePbwMetadata, granted: Map<String, Boolean?>,
+    ): Boolean = sideloadApp(pbwPath, granted = granted)
+
     override suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean = false
 
     override fun getAllLockerBasicInfo(): Flow<List<AppBasicProperties>> {

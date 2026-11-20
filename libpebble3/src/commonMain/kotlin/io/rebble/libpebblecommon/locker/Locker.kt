@@ -159,6 +159,10 @@ class Locker(
         loadOnWatch: Boolean,
     ): Boolean = importPbw(pbwPath, loadOnWatch, storeMetadata)
 
+    override suspend fun sideloadApp(
+        pbwPath: Path, storeMetadata: StorePbwMetadata, granted: Map<String, Boolean?>,
+    ): Boolean = importPbw(pbwPath, loadOnWatch = true, storeMetadata = storeMetadata, granted = granted)
+
     override suspend fun associateStoreMetadata(storeMetadata: StorePbwMetadata): Boolean =
         accountMutations.mutate {
             lockerEntryDao.associateStoreMetadata(storeMetadata)

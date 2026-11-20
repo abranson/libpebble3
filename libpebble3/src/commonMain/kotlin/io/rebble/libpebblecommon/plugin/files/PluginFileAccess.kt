@@ -57,13 +57,23 @@ class PluginFileAccess(
         permissions.check(appUuid, keyFor(mode))
 
     override suspend fun grantPluginFile(appUuid: Uuid, scope: String, mode: FileAccessMode, handle: String): FileHandleInfo? {
+        return grantFile(appUuid, scope, mode, handle, replaceMode = false)
+    }
+
+    internal suspend fun grantFile(appUuid: Uuid, scope: String, mode: FileAccessMode, handle: String,
+                                   replaceMode: Boolean): FileHandleInfo? {
         fileSystem.retain(scope, handle)
         if (fileSystem.stat(scope, emptyList()) == null) {
             logger.w { "picked entry is unreachable; not granting" }
             releaseIfUnreferenced(scope)
             return null
         }
-        permissions.setDecisions(appUuid, mapOf(keyFor(mode, scope) to true))
+        val decisions = mutableMapOf<String, Boolean?>(keyFor(mode, scope) to true)
+        if (replaceMode && mode == FileAccessMode.Read &&
+            dao.getByAppUuid(appUuid).any { it.permission == writeFilesKey(scope) && it.granted == true }) {
+            decisions[writeFilesKey(scope)] = false
+        }
+        permissions.setDecisions(appUuid, decisions)
         return handleInfo(scope, mode)
     }
 

@@ -6,9 +6,9 @@ import io.rebble.libpebblecommon.plugin.PluginErrors
 import io.rebble.libpebblecommon.plugin.PluginNativeException
 
 internal actual fun platformPluginFileSystem(appContext: AppContext, settings: Settings): PluginFileSystem =
-    UnavailablePluginFileSystem
+    appContext.pluginFileSystem ?: UnavailablePluginFileSystem
 
-/** The JVM target has no platform file picker that can grant access to a scope. */
+/** Portable JVM hosts may run without a folder picker. */
 private object UnavailablePluginFileSystem : PluginFileSystem {
     override suspend fun retain(scope: String, handle: String) = unavailable()
     override suspend fun release(scope: String) = Unit
