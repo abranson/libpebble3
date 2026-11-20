@@ -81,7 +81,7 @@ fun PbwApp.toLockerEntry(
     }
     return LockerEntry(
         id = uuid,
-        version = info.versionLabel,
+        version = storeMetadata?.releaseVersion ?: info.versionLabel,
         title = info.longName.ifBlank { info.shortName },
         // A pbw with a plugin but no watchapp build is plugin-only: its own type, so it stays out
         // of the app lists and off the watch (see AppType.Plugin).

@@ -605,40 +605,67 @@ class Locker(
             pbwApp.info.watchapp.watchface -> AppType.Watchface
             else -> AppType.Watchapp
         }
-        val lockerEntry = pbwApp.toLockerEntry(clock.now(), orderIndexForInsert(type), storeMetadata).let { new ->
-            // A permissions-only change doesn't make the watch reload the binary
-            new.copy(watchPermissions = lockerEntryDao.getEntry(new.id)?.watchPermissions ?: 0)
-        }
-        // A plugin-only pbw never reaches the watch.
-        val tasks = if (loadOnWatch && type != AppType.Plugin) {
-            watchManager.watches.value.filterIsInstance<ConnectedPebbleDevice>().map {
-                libPebbleCoroutineScope.async {
-                    val entryStatus = lockerEntryDao.existsOnWatch(
-                        it.identifier.asString,
-                        lockerEntry.id
-                    ).drop(1).first()
-                    if (entryStatus) {
-                        logger.d { "App synced, launching" }
-                        it.launchApp(lockerEntry.id)
-                    }
+        val new = pbwApp.toLockerEntry(clock.now(), orderIndexForInsert(type), storeMetadata)
+        val tasks = accountMutations.mutate {
+            val current = lockerEntryDao.getEntry(new.id)
+            val upgrade = storeMetadata?.upgradeFrom
+            if (upgrade != null && (current == null || current.systemApp || current.type != new.type ||
+                    current.version != upgrade.version || current.appstoreData?.storeId != upgrade.storeId)
+            ) return@mutate null
+            var lockerEntry = new.copy(watchPermissions = current?.watchPermissions ?: 0)
+            if (current != null && upgrade != null) {
+                val metadata = lockerEntry.appstoreData
+                lockerEntry = lockerEntry.copy(
+                    orderIndex = current.orderIndex,
+                    active = current.active,
+                    appstoreData = if (metadata?.storeId == upgrade.storeId) {
+                        metadata?.copy(userToken = current.appstoreData?.userToken)
+                    } else metadata,
+                )
+            }
+            pbwApp.source().buffered().use { source ->
+                if (upgrade == null) {
+                    lockerPBWCache.deleteApp(lockerEntry.id)  // Clear old version(s) if re-sideloading.
+                    lockerPBWCache.addPBWFileForApp(lockerEntry.id, lockerEntry.version, source)
+                } else {
+                    // Keep the working PBW until the replacement has been copied and installed.
+                    lockerPBWCache.replacePbwAtomically(lockerEntry.id, lockerEntry.version, source)
+                    lockerPBWCache.clearPKJSFileForApp(lockerEntry.id)
                 }
             }
-        } else {
-            null
-        }
-        accountMutations.mutate {
-            lockerPBWCache.deleteApp(lockerEntry.id)  // Clear old version(s) if re-sideloading
-            pbwApp.source().buffered().use {
-                lockerPBWCache.addPBWFileForApp(lockerEntry.id, pbwApp.info.versionLabel, it)
+            // A plugin-only PBW never reaches the watch.
+            val launches = if (loadOnWatch && type != AppType.Plugin) {
+                watchManager.watches.value.filterIsInstance<ConnectedPebbleDevice>().map {
+                    libPebbleCoroutineScope.async {
+                        val entryStatus = lockerEntryDao.existsOnWatch(
+                            it.identifier.asString,
+                            lockerEntry.id,
+                        ).drop(1).first()
+                        if (entryStatus) {
+                            logger.d { "App synced, launching" }
+                            it.launchApp(lockerEntry.id)
+                        }
+                    }
+                }
+            } else emptyList()
+            try {
+                lockerEntryDao.insertOrReplaceAndOrder(lockerEntry, config.value.lockerSyncLimitV2)
+                permissions.recordRequested(lockerEntry.id, pbwApp.requestedPermissions())
+                permissions.setDecisions(lockerEntry.id, granted)
+                if (upgrade != null) {
+                    runCatching { lockerPBWCache.deleteOtherVersions(lockerEntry.id, lockerEntry.version) }
+                        .onFailure { logger.w(it) { "Could not clean up previous PBWs for ${lockerEntry.id}" } }
+                }
+                performCacheCleanup()
+            } catch (e: Exception) {
+                launches.forEach { it.cancel() }
+                throw e
             }
-            lockerEntryDao.insertOrReplaceAndOrder(lockerEntry, config.value.lockerSyncLimitV2)
-            permissions.recordRequested(lockerEntry.id, pbwApp.requestedPermissions())
-            permissions.setDecisions(lockerEntry.id, granted)
-            performCacheCleanup()
-        }
+            launches
+        } ?: return false
         return try {
             withTimeout(40.seconds) {
-                tasks?.awaitAll()
+                tasks.awaitAll()
                 true
             }
         } catch (e: TimeoutCancellationException) {
@@ -1105,6 +1132,24 @@ abstract class LockerPBWCache(private val context: AppContext) {
         SystemFileSystem.sink(targetPath).use { sink ->
             source.transferTo(sink)
         }
+    }
+
+    internal fun replacePbwAtomically(appId: Uuid, version: String, source: Source) {
+        val destination = pathForApp(appId, version)
+        val temporary = Path(cacheDir, ".upgrade-${Uuid.random()}.tmp")
+        try {
+            SystemFileSystem.sink(temporary).use { source.transferTo(it) }
+            SystemFileSystem.atomicMove(temporary, destination)
+        } finally {
+            SystemFileSystem.delete(temporary, mustExist = false)
+        }
+    }
+
+    internal fun deleteOtherVersions(appId: Uuid, version: String) {
+        val current = pathForApp(appId, version)
+        SystemFileSystem.list(cacheDir)
+            .filter { it.name.startsWith("${appId}_") && it.name.endsWith(".pbw") && it.name != current.name }
+            .forEach { SystemFileSystem.delete(it) }
     }
 
     private fun sanitizeJS(js: String): String {

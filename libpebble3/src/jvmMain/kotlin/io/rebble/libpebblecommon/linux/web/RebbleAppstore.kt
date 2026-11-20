@@ -87,30 +87,33 @@ object RebbleAppstore {
     /** Read-only search: never adds the app to a remote account or downloads a replacement PBW. */
     suspend fun findStoreMetadata(uuid: Uuid): StorePbwMetadata? =
         try {
-            val response = httpClient.post(SEARCH_URL) {
-                header("X-Algolia-Application-Id", "7683OW76EQ")
-                // Public search-only key for the Rebble app-store index.
-                header("X-Algolia-API-Key", "252f4938082b8693a8a9fc0157d1d24f")
-                contentType(ContentType.Application.Json)
-                setBody(buildJsonObject {
-                    put("query", uuid.toString())
-                    put("hitsPerPage", 10)
-                    put("analytics", false)
-                }.toString())
-            }
-            if (response.status.isSuccess()) {
-                val storeId = findRebbleStoreId(response.bodyAsText(), uuid)
-                val metadata = storeId?.let { lookupApp(it)?.storeMetadata(it) }
-                metadata?.takeIf { it.uuid == uuid }
-            } else {
-                logger.w { "store UUID lookup failed: ${response.status}" }
-                null
-            }
+            val storeId = findListingId(uuid)?.appId
+            storeId?.let { lookupApp(it)?.storeMetadata(it) }?.takeIf { it.uuid == uuid }
         } catch (e: Exception) {
             e.rethrowCancellation()
             logger.w { "store UUID lookup failed: ${e.message}" }
             null
         }
+
+    suspend fun findListingId(uuid: Uuid): AppstoreListingId? {
+        val response = httpClient.post(SEARCH_URL) {
+            header("X-Algolia-Application-Id", "7683OW76EQ")
+            // Public search-only key for the Rebble app-store index.
+            header("X-Algolia-API-Key", "252f4938082b8693a8a9fc0157d1d24f")
+            contentType(ContentType.Application.Json)
+            setBody(buildJsonObject {
+                put("query", uuid.toString())
+                put("hitsPerPage", 10)
+                put("analytics", false)
+            }.toString())
+        }
+        check(response.status.isSuccess()) { "Rebble UUID lookup returned ${response.status}" }
+        return findRebbleStoreId(response.bodyAsText(), uuid)
+            ?.let(AppstoreListingId::parse)?.takeUnless { it.core }
+    }
+
+    fun decodeMetadata(body: String, storeId: String): StorePbwMetadata? =
+        json.decodeFromString<AppsResponse>(body).data.firstOrNull()?.storeMetadata(storeId)
 
     /**
      * Add an app to the user's Rebble locker, which is what assigns its per-user timeline
@@ -179,10 +182,12 @@ internal data class AppRecord(
             storeId = storeId,
         ),
         platforms = hardwarePlatforms,
+        releaseVersion = latestRelease?.version?.takeIf { it.isNotBlank() },
     )
 }
 
 @Serializable
 internal data class AppRelease(
     @SerialName("pbw_file") val pbwFile: String? = null,
+    val version: String? = null,
 )

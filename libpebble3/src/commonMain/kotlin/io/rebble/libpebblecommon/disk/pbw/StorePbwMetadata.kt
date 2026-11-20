@@ -10,7 +10,17 @@ data class StorePbwMetadata(
     val uuid: Uuid,
     val appstoreData: LockerEntryAppstoreData,
     val platforms: List<LockerEntryPlatform>,
+    val releaseVersion: String? = null,
+    val upgradeFrom: InstalledRelease? = null,
 ) {
+    data class InstalledRelease(val storeId: String, val version: String)
+
+    init {
+        require(releaseVersion == null || (
+            releaseVersion.isNotBlank() && releaseVersion.encodeToByteArray().size <= 128 &&
+                releaseVersion.none { it == '/' || it == '\\' || it.isISOControl() }
+            )) { "Invalid store release version" }
+    }
     internal fun applyTo(entry: LockerEntry): LockerEntry {
         require(entry.id == uuid) { "Store metadata does not match the PBW UUID" }
         require(!appstoreData.storeId.isNullOrBlank()) { "Store metadata has no store ID" }

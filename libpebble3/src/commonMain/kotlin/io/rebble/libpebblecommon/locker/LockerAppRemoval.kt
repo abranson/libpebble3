@@ -6,6 +6,7 @@ import io.rebble.libpebblecommon.connection.UserFacingError
 import io.rebble.libpebblecommon.connection.WebAccountSession
 import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.database.Database
+import io.rebble.libpebblecommon.web.CORE_STORE_ID_PREFIX
 import kotlin.uuid.Uuid
 
 /** Account-scoped removal, shared by the public and compatibility application APIs. */
@@ -25,6 +26,7 @@ internal class LockerAppRemoval(
     suspend fun removeApp(id: Uuid): Boolean {
         var removedSideloaded = false
         var storeLinkedSideload = false
+        var localCoreApp = false
         val remoteSession = accountMutations.mutateWithSession(
             webSession = webServices::currentAccountSession,
         ) { capturedSession ->
@@ -40,10 +42,11 @@ internal class LockerAppRemoval(
             logger.d { "Deleting app ${lockerEntry.id} (${lockerEntry.title})" }
             // Store PBWs may be imported locally before being added to the account locker.
             // Removing just that local override would let the following sync restore the app.
-            storeLinkedSideload = lockerEntry.sideloaded &&
-                !lockerEntry.appstoreData?.storeId.isNullOrBlank() &&
-                capturedSession.webSession != null
-            if (lockerEntry.sideloaded && !storeLinkedSideload) {
+            val storeId = lockerEntry.appstoreData?.storeId
+            localCoreApp = storeId?.startsWith(CORE_STORE_ID_PREFIX) == true
+            storeLinkedSideload = lockerEntry.sideloaded && !localCoreApp &&
+                !storeId.isNullOrBlank() && capturedSession.webSession != null
+            if (localCoreApp || (lockerEntry.sideloaded && !storeLinkedSideload)) {
                 lockerEntryDao.markForDeletionWithTimeline(id, timelinePinDao, timelineReminderDao)
                 deleteCachedApp(id)
                 removedSideloaded = true
@@ -78,7 +81,8 @@ internal class LockerAppRemoval(
                 val current = lockerEntryDao.getEntry(id)
                 when {
                     current == null -> true // A concurrent same-session remove already committed.
-                    current.systemApp || current.sideloaded != storeLinkedSideload -> false
+                    current.systemApp || current.sideloaded != storeLinkedSideload ||
+                        current.appstoreData?.storeId?.startsWith(CORE_STORE_ID_PREFIX) == true -> false
                     else -> {
                         lockerEntryDao.markForDeletionWithTimeline(
                             id,
@@ -96,7 +100,7 @@ internal class LockerAppRemoval(
             }
         }
 
-        if (removedSideloaded) {
+        if (removedSideloaded && !localCoreApp) {
             logger.d { "Requesting locker sync after removing sideloaded app" }
             // If it was sideloaded, trigger a resync (in case the same app is in the locker).
             requestLockerSync()
