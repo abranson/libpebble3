@@ -1,12 +1,9 @@
 package io.rebble.libpebblecommon.linux.web
 
-import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
-import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
-import io.ktor.utils.io.jvm.javaio.copyTo
 import io.rebble.libpebblecommon.database.entity.LockerEntryAppstoreData
 import io.rebble.libpebblecommon.disk.pbw.StorePbwMetadata
 import io.rebble.libpebblecommon.web.CORE_STORE_ID_PREFIX
@@ -50,14 +47,7 @@ object CoreAppstore {
         check(lookup.status.isSuccess()) { "Core store lookup returned ${lookup.status}" }
         val metadata = decodeMetadata(lookup.bodyAsText(), id) ?: return null
 
-        val response = client.get(metadata.appstoreData.pbwLink) {
-            timeout {
-                requestTimeoutMillis = 120_000
-                socketTimeoutMillis = 30_000
-            }
-        }
-        check(response.status.isSuccess()) { "Core store package download returned ${response.status}" }
-        destination.outputStream().use { response.bodyAsChannel().copyTo(it) }
+        client.downloadPbwFile(metadata.appstoreData.pbwLink, destination)
         return metadata
     }
 

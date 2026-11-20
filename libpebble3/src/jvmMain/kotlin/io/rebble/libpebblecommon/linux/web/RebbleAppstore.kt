@@ -2,19 +2,16 @@ package io.rebble.libpebblecommon.linux.web
 
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
-import io.ktor.client.plugins.timeout
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
-import io.ktor.utils.io.jvm.javaio.copyTo
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -49,17 +46,7 @@ object RebbleAppstore {
             return null
         }
         return try {
-            val response = httpClient.get(pbwUrl) {
-                timeout {
-                    requestTimeoutMillis = PBW_REQUEST_TIMEOUT_MS
-                    socketTimeoutMillis = PBW_SOCKET_TIMEOUT_MS
-                }
-            }
-            if (!response.status.isSuccess()) {
-                logger.w { "pbw download failed: ${response.status}" }
-                return null
-            }
-            destination.outputStream().use { response.bodyAsChannel().copyTo(it) }
+            httpClient.downloadPbwFile(pbwUrl, destination)
             logger.d { "downloaded $pbwUrl to $destination" }
             DownloadedApp(Path(destination.absolutePath), record.uuid, record.storeMetadata(storeId))
         } catch (e: Exception) {
@@ -141,8 +128,6 @@ object RebbleAppstore {
 
     private const val API_URL = "https://appstore-api.rebble.io/api/v1"
     private const val SEARCH_URL = "https://7683ow76eq-dsn.algolia.net/1/indexes/rebble-appstore-production/query"
-    private const val PBW_REQUEST_TIMEOUT_MS = 2 * 60 * 1000L
-    private const val PBW_SOCKET_TIMEOUT_MS = 30 * 1000L
 }
 
 internal fun findRebbleStoreId(body: String, uuid: Uuid): String? =
