@@ -11,15 +11,16 @@ import io.rebble.libpebblecommon.di.ConnectionCoroutineScope
 import io.rebble.libpebblecommon.services.WatchInfo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.seconds
 
 interface FirmwareUpdateManager {
     fun init(watchInfo: WatchInfo)
+    fun isCurrentOffer(update: FirmwareUpdateCheckResult.FoundUpdate): Boolean = true
     fun checkForUpdates(force: Boolean)
     val availableUpdates: Flow<FirmwareUpdateCheckState>
 }
@@ -33,7 +34,7 @@ class RealFirmwareUpdateManager(
     private val _availableUpdates = MutableStateFlow<FirmwareUpdateCheckState>(
         FirmwareUpdateCheckState(checkingForUpdates = false, result = null)
     )
-    private val checkTrigger = MutableSharedFlow<Boolean>(extraBufferCapacity = 5)
+    private val checkTrigger = Channel<Boolean>(Channel.CONFLATED)
     private var watchInfo: WatchInfo? = null
     private val logger = Logger.withTag("FirmwareUpdateManager")
 
@@ -44,19 +45,31 @@ class RealFirmwareUpdateManager(
     override fun init(watchInfo: WatchInfo) {
         this.watchInfo = watchInfo
         connectionCoroutineScope.launch {
-            checkTrigger.conflate().collect {
+            checkTrigger.receiveAsFlow().collect {
                 doUpdateCheck(it)
             }
         }
         connectionCoroutineScope.launch {
-            delay(INITIAL_DELAY_PERIOD)
-            checkForUpdates(false)
+            val revisions = webServices.firmwareAccountRevision(watchInfo)
+            if (revisions == null) {
+                delay(INITIAL_DELAY_PERIOD)
+                checkForUpdates(false)
+            } else {
+                revisions.collect { checkForUpdates(false) }
+            }
         }
+    }
+
+    override fun isCurrentOffer(update: FirmwareUpdateCheckResult.FoundUpdate): Boolean {
+        val revision = update.accountRevision ?: return true
+        val watch = watchInfo ?: return false
+        return revision == webServices.firmwareAccountRevision(watch)?.value &&
+            _availableUpdates.value.result == update
     }
 
     override fun checkForUpdates(force: Boolean) {
         logger.d { "checkForUpdates" }
-        checkTrigger.tryEmit(force)
+        checkTrigger.trySend(force)
     }
 
     private suspend fun doUpdateCheck(force: Boolean) {
@@ -66,14 +79,19 @@ class RealFirmwareUpdateManager(
             return
         }
         logger.d { "doUpdateCheck" }
-        _availableUpdates.value = _availableUpdates.value.copy(checkingForUpdates = true)
+        val revisions = webServices.firmwareAccountRevision(watch)
+        val revision = revisions?.value
+        _availableUpdates.value = FirmwareUpdateCheckState(checkingForUpdates = true, result = null)
         val firmwareUpdateAvailable = when (val result = webServices.checkForFirmwareUpdate(watch, force)) {
             is FirmwareUpdateCheckResult.FoundUpdate -> result.copy(
+                accountRevision = revision,
                 installsDirectly = installsDirectly(watch.runningFwVersion, result.version, pendingInstalls.get(identifier)),
             )
             else -> result
         }
-        _availableUpdates.value = FirmwareUpdateCheckState(checkingForUpdates = false, result = firmwareUpdateAvailable)
+        if (revision == revisions?.value) {
+            _availableUpdates.value = FirmwareUpdateCheckState(checkingForUpdates = false, result = firmwareUpdateAvailable)
+        }
     }
 
     override val availableUpdates: Flow<FirmwareUpdateCheckState> = _availableUpdates.asStateFlow()

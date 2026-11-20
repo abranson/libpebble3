@@ -464,6 +464,7 @@ class RealFirmwareUpdater(
         requireResume: Boolean,
     ) {
         connectionCoroutineScope.launch {
+            if (!requireResume && !firmwareUpdateManager.isCurrentOffer(update)) return@launch
             logger.d { "updateFirmware: ${update.version.stringVersion}" }
             val fwupProps = props
             if (fwupProps == null) {

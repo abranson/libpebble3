@@ -18,6 +18,7 @@ import io.rebble.libpebblecommon.services.FirmwareVersion
 import io.rebble.libpebblecommon.services.WatchInfo
 import io.rebble.libpebblecommon.web.LockerModel
 import io.rebble.libpebblecommon.web.LockerModelWrapper
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -34,6 +35,7 @@ class RebbleWebServices private constructor(
     private val token: () -> String?,
     private val bootConfig: RebbleBootConfigProvider,
     private val coreToken: suspend () -> String?,
+    private val coreRevision: StateFlow<Long>?,
     private val httpClientProvider: Lazy<HttpClient>,
 ) : WebServices {
     @JvmOverloads
@@ -41,14 +43,21 @@ class RebbleWebServices private constructor(
         token: () -> String?,
         bootConfig: RebbleBootConfigProvider,
         coreToken: suspend () -> String? = { null },
-    ) : this(token, bootConfig, coreToken, lazy(::newRebbleHttpClient))
+    ) : this(token, bootConfig, coreToken, null, lazy(::newRebbleHttpClient))
+
+    constructor(
+        token: () -> String?,
+        bootConfig: RebbleBootConfigProvider,
+        coreToken: suspend () -> String?,
+        coreRevision: StateFlow<Long>,
+    ) : this(token, bootConfig, coreToken, coreRevision, lazy(::newRebbleHttpClient))
 
     internal constructor(
         token: () -> String?,
         bootConfig: RebbleBootConfigProvider,
         httpClient: HttpClient,
         coreToken: suspend () -> String? = { null },
-    ) : this(token, bootConfig, coreToken, lazyOf(httpClient))
+    ) : this(token, bootConfig, coreToken, null, lazyOf(httpClient))
 
     private val logger = Logger.withTag("RebbleWebServices")
 
@@ -200,6 +209,9 @@ class RebbleWebServices private constructor(
 
     override fun uploadMemfaultChunk(chunk: ByteArray, watchInfo: WatchInfo) {}
     override fun uploadAnalyticsHeartbeat(payload: ByteArray, watchInfo: WatchInfo) {}
+
+    override fun firmwareAccountRevision(watch: WatchInfo): StateFlow<Long>? =
+        coreRevision.takeIf { watch.platform.isCoreDevicesHardware() }
 
     override suspend fun checkForFirmwareUpdate(watch: WatchInfo, force: Boolean): FirmwareUpdateCheckResult =
         if (watch.platform.isCoreDevicesHardware()) {

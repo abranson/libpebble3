@@ -402,6 +402,8 @@ interface WebServices {
     /** Remove from the exact account captured in [session]. */
     suspend fun removeFromLocker(id: Uuid, session: WebAccountSession): Boolean = false
 
+    fun firmwareAccountRevision(watch: WatchInfo): StateFlow<Long>? = null
+
     suspend fun checkForFirmwareUpdate(watch: WatchInfo, force: Boolean): FirmwareUpdateCheckResult
     fun uploadMemfaultChunk(chunk: ByteArray, watchInfo: WatchInfo)
     fun uploadAnalyticsHeartbeat(payload: ByteArray, watchInfo: WatchInfo)
@@ -439,6 +441,7 @@ sealed class FirmwareUpdateCheckResult {
         val notes: String,
         /** Whether the watch boots this after a normal install, rather than going through recovery. */
         val installsDirectly: Boolean,
+        val accountRevision: Long? = null,
     ) : FirmwareUpdateCheckResult()
 
     data object FoundNoUpdate : FirmwareUpdateCheckResult()
