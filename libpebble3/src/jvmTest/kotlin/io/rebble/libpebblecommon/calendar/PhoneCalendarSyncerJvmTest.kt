@@ -435,7 +435,9 @@ class PhoneCalendarSyncerJvmTest {
 
         override fun hasPermission(): Boolean = permissionGranted
 
-        override suspend fun createEvent(event: NewCalendarEvent): String? = null
+        override suspend fun createEvent(calendarId: String, event: NewCalendarEvent): String? = null
+
+        override suspend fun defaultCalendarPlatformId(): String? = null
 
         override fun supportsPinActions(): Boolean = false
     }

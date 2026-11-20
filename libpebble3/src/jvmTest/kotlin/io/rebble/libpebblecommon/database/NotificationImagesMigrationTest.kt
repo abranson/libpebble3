@@ -1,8 +1,9 @@
 package io.rebble.libpebblecommon.database
 
-import androidx.room.Room
+import androidx.sqlite.SQLiteDriver
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.sqlite.execSQL
+import io.rebble.libpebblecommon.connection.AppContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.*
@@ -34,9 +35,13 @@ class NotificationImagesMigrationTest {
             if (sailfish) connection.execSQL("INSERT INTO SendTextContactEntity (recordHashcode, deleted, sync, contactId, name, methodsJson) VALUES (42, 0, 1, '00112233-4455-6677-8899-aabbccddeeff', 'Alice', '[]')")
             connection.execSQL("PRAGMA user_version = 42")
         }
-        val database = Room.databaseBuilder<Database>(name = path)
-            .addMigrations(MIGRATION_42_46, MIGRATION_46_47)
-            .setDriver(driver).setQueryCoroutineContext(Dispatchers.IO).build()
+        // Keep the real JVM migration registration while opening only the test database.
+        val testDriver = object : SQLiteDriver by driver {
+            override fun open(fileName: String) = driver.open(path)
+        }
+        val database = getDatabaseBuilder(AppContext())
+            .addMigrations(MIGRATION_53_54, MIGRATION_54_55)
+            .setDriver(testDriver).setQueryCoroutineContext(Dispatchers.IO).build()
         try {
             assertEquals("preserved", database.appPrefsDao().getEntry("migration-sentinel")?.value)
             assertEquals(if (sailfish) listOf("Alice") else emptyList(), database.sendTextContactDao().getAll().map { it.name })

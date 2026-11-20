@@ -9,6 +9,10 @@ import io.rebble.libpebblecommon.connection.WebServices
 import io.rebble.libpebblecommon.database.dao.FakeLockerEntryDao
 import io.rebble.libpebblecommon.database.entity.LockerEntry
 import io.rebble.libpebblecommon.database.entity.LockerEntryAppstoreData
+import io.rebble.libpebblecommon.permissions.APP
+import io.rebble.libpebblecommon.permissions.FakePermissionDao
+import io.rebble.libpebblecommon.permissions.permissions
+import io.rebble.libpebblecommon.plugin.PluginPermissions.TIMELINE
 import io.rebble.libpebblecommon.services.WatchInfo
 import io.rebble.libpebblecommon.web.LockerModelWrapper
 import kotlinx.coroutines.CompletableDeferred
@@ -21,7 +25,7 @@ import kotlin.uuid.Uuid
 class JsTokenUtilTest {
     @Test
     fun signedOutAccountCannotReadPersistedLockerToken() = runTest {
-        val uuid = Uuid.random()
+        val uuid = APP
         var daoReads = 0
         val webServices = SessionWebServices(token = null)
         val util = JsTokenUtil(
@@ -31,6 +35,7 @@ class JsTokenUtilTest {
                 entry(uuid, "stale-token")
             },
             watchConfigFlow = WatchConfig(emulateRemoteTimeline = false).asFlow(),
+            permissions = timelinePermissions(),
             webServices = webServices,
         )
 
@@ -41,7 +46,7 @@ class JsTokenUtilTest {
 
     @Test
     fun invalidatedSessionRejectsTokenReadAcrossAccountAba() = runTest {
-        val uuid = Uuid.random()
+        val uuid = APP
         val queryEntered = CompletableDeferred<Unit>()
         val releaseQuery = CompletableDeferred<Unit>()
         val webServices = SessionWebServices(token = "account-a")
@@ -53,6 +58,7 @@ class JsTokenUtilTest {
                 entry(uuid, "stale-account-a-token")
             },
             watchConfigFlow = WatchConfig(emulateRemoteTimeline = false).asFlow(),
+            permissions = timelinePermissions(),
             webServices = webServices,
         )
 
@@ -65,6 +71,10 @@ class JsTokenUtilTest {
 
         assertEquals(null, token.await())
         assertEquals(0, webServices.sandboxCalls)
+    }
+
+    private suspend fun timelinePermissions() = permissions(FakePermissionDao()).apply {
+        setDecisions(APP, mapOf(TIMELINE to true))
     }
 
     private fun entry(uuid: Uuid, userToken: String) = LockerEntry(

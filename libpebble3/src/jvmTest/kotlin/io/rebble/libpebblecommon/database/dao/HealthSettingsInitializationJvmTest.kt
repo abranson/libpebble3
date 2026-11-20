@@ -24,6 +24,9 @@ import io.rebble.libpebblecommon.database.Database
 import io.rebble.libpebblecommon.database.entity.HRMonitoringInterval
 import io.rebble.libpebblecommon.database.entity.HealthGender
 import io.rebble.libpebblecommon.database.entity.HealthSettingsEntry
+import io.rebble.libpebblecommon.database.entity.HeartRatePreferencesValue
+import io.rebble.libpebblecommon.database.entity.currentYear
+import io.rebble.libpebblecommon.database.entity.defaultHealthSettings
 import io.rebble.libpebblecommon.database.entity.getWatchSettings
 import io.rebble.libpebblecommon.database.entity.setWatchSettings
 import io.rebble.libpebblecommon.health.HealthSettings
@@ -50,7 +53,7 @@ class HealthSettingsInitializationJvmTest {
             val selected = original.copy(bloodOxygenEnabled = true,
                 spo2MeasurementInterval = HRMonitoringInterval.ThirtyMin)
             dao.setWatchSettingsTransactionally(selected)
-            assertEquals(selected, dao.getWatchSettings().first())
+            assertEquals(selected.asPersisted(), dao.getWatchSettings().first())
             val enabledEntry = assertNotNull(dao.getEntry(KEY_BLOOD_OXYGEN_PREFERENCES))
             val intervalEntry = assertNotNull(dao.getEntry(KEY_SPO2_PREFERENCES))
             assertContentEquals(ubyteArrayOf(1u), enabledEntry.value(oxygenParams()))
@@ -59,16 +62,17 @@ class HealthSettingsInitializationJvmTest {
                 firmwareVersion = oxygenParams().firmwareVersion.copy(minor = 3))))
             // Saving an unrelated legacy snapshot must not erase known oxygen values.
             dao.setWatchSettingsTransactionally(original.copy(ageYears = 48))
-            assertEquals(selected.copy(ageYears = 48), dao.getWatchSettings().first())
+            assertEquals(selected.copy(ageYears = 48).asPersisted(), dao.getWatchSettings().first())
             assertEquals(enabledEntry.timestamp, dao.getEntry(KEY_BLOOD_OXYGEN_PREFERENCES)?.timestamp)
-            val write = DbWrite(1u, BlobDatabase.HealthParams, 1800000000u,
+            val watchTimestamp = enabledEntry.timestamp.instant.epochSeconds.toUInt() + 1u
+            val write = DbWrite(1u, BlobDatabase.HealthParams, watchTimestamp,
                 KEY_BLOOD_OXYGEN_PREFERENCES.encodeToByteArray().toUByteArray(),
                 ubyteArrayOf(0u), WriteType.Write)
             assertEquals(BlobResponse.BlobStatus.Success, dao.handleWrite(write, "test-watch", oxygenParams()))
             assertEquals(false, dao.getWatchSettings().first().bloodOxygenEnabled)
             assertEquals(HRMonitoringInterval.ThirtyMin, dao.getWatchSettings().first().spo2MeasurementInterval)
             assertEquals(BlobResponse.BlobStatus.InvalidData,
-                dao.handleWrite(write.copy(timestamp = 1800000001u, value = ubyteArrayOf(2u)), "test-watch", oxygenParams()))
+                dao.handleWrite(write.copy(timestamp = watchTimestamp + 1u, value = ubyteArrayOf(2u)), "test-watch", oxygenParams()))
             assertEquals(false, dao.getWatchSettings().first().bloodOxygenEnabled)
         }
     }
@@ -103,7 +107,7 @@ class HealthSettingsInitializationJvmTest {
             )
 
             assertEquals(settings, dao.initializeIfAbsent { settings })
-            assertEquals(settings, dao.getWatchSettings().first())
+            assertEquals(settings.asPersisted(), dao.getWatchSettings().first())
             HEALTH_SETTING_KEYS.forEach { key -> assertNotNull(dao.getEntry(key)) }
         }
     }
@@ -111,7 +115,7 @@ class HealthSettingsInitializationJvmTest {
     @Test
     fun deliberatelyStoredDefaultsAreNotTreatedAsAbsent() = runTest {
         withHealthSettingsDao { dao ->
-            val defaults = healthSettings()
+            val defaults = defaultHealthSettings()
             dao.setWatchSettings(defaults)
 
             assertNull(
@@ -119,7 +123,7 @@ class HealthSettingsInitializationJvmTest {
                     defaults.copy(trackingEnabled = true, ageYears = 42, imperialUnits = true)
                 },
             )
-            assertEquals(defaults, dao.getWatchSettings().first())
+            assertEquals(defaults.asPersisted(), dao.getWatchSettings().first())
             HEALTH_SETTING_KEYS.forEach { key -> assertNotNull(dao.getEntry(key)) }
         }
     }
@@ -179,6 +183,7 @@ class HealthSettingsInitializationJvmTest {
             val dao = database.healthSettingsDao()
             val original = healthSettings()
             dao.setWatchSettingsTransactionally(original)
+            val persisted = dao.getWatchSettings().first()
             database.useWriterConnection {
                 it.execSQL(
                     """
@@ -203,7 +208,7 @@ class HealthSettingsInitializationJvmTest {
                     ),
                 )
             }
-            assertEquals(original, dao.getWatchSettings().first())
+            assertEquals(persisted, dao.getWatchSettings().first())
         } finally {
             database.close()
             directory.toFile().deleteRecursively()
@@ -226,6 +231,18 @@ class HealthSettingsInitializationJvmTest {
             database.close()
             directory.toFile().deleteRecursively()
         }
+    }
+
+    // The settings write stores an inferred birth year and age-derived heart-rate zones.
+    private fun HealthSettings.asPersisted(): HealthSettings {
+        val heartRate = HeartRatePreferencesValue.forAge(ageYears, restingHr, elevatedHr)
+        return copy(
+            birthYear = currentYear() - ageYears,
+            maxHr = heartRate.maxHr,
+            hrZone1Threshold = heartRate.zone1Threshold,
+            hrZone2Threshold = heartRate.zone2Threshold,
+            hrZone3Threshold = heartRate.zone3Threshold,
+        )
     }
 
     private fun healthSettings() = HealthSettings(

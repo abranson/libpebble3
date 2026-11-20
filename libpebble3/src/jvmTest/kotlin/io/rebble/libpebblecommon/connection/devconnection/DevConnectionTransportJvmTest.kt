@@ -3,6 +3,7 @@ package io.rebble.libpebblecommon.connection.devconnection
 import io.rebble.libpebblecommon.connection.FakeLibPebble
 import io.rebble.libpebblecommon.connection.LibPebble
 import io.rebble.libpebblecommon.connection.PebbleIdentifier
+import io.rebble.libpebblecommon.connection.endpointmanager.LastFirmwareUpdateStates
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.files.Path
@@ -18,7 +19,7 @@ import kotlin.test.assertTrue
 class DevConnectionTransportJvmTest {
     @Test
     fun temporaryPbwPathsAreUnique() {
-        val paths = List(16) { getTempPbwPath().toString() }
+        val paths = List(16) { getTempPath("pbw").toString() }
 
         assertEquals(paths.size, paths.toSet().size)
         assertTrue(paths.all { it.substringAfterLast('/').matches(Regex("devconn-[0-9a-f-]+\\.pbw")) })
@@ -29,7 +30,11 @@ class DevConnectionTransportJvmTest {
         val payload = "unique developer bundle".encodeToByteArray()
         var observedPath: java.nio.file.Path? = null
         val libPebble = object : LibPebble by FakeLibPebble() {
-            override suspend fun sideloadApp(pbwPath: Path, loadOnWatch: Boolean): Boolean {
+            override suspend fun sideloadApp(
+                pbwPath: Path,
+                loadOnWatch: Boolean,
+                granted: Map<String, Boolean?>,
+            ): Boolean {
                 val file = Paths.get(pbwPath.toString())
                 observedPath = file
                 assertContentEquals(payload, Files.readAllBytes(file))
@@ -43,7 +48,7 @@ class DevConnectionTransportJvmTest {
         assertFalse(Files.exists(file))
     }
 
-    private class TestTransport(libPebble: LibPebble) : DevConnectionTransport(libPebble) {
+    private class TestTransport(libPebble: LibPebble) : DevConnectionTransport(libPebble, LastFirmwareUpdateStates()) {
         suspend fun install(payload: ByteArray): Boolean = installPBW(payload)
 
         override suspend fun start(

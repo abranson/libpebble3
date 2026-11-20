@@ -32,8 +32,9 @@ class RebbleStoreMetadataJvmTest {
             assertEquals("store-id", imported.appstoreData?.storeId)
             assertEquals("pbw-url", imported.appstoreData?.pbwLink)
             assertTrue(imported.sideloaded)
-            assertEquals(original.version, imported.version)
-            assertEquals(original.recordHashCode(), imported.recordHashCode())
+            assertEquals("99.0", imported.version)
+            assertEquals(original.pbwVersionCode, imported.pbwVersionCode)
+            assertEquals(original.copy(version = "99.0").recordHashCode(), imported.recordHashCode())
             assertEquals(original.platforms.map { it.name }, imported.platforms.map { it.name })
             val aplite = imported.platforms.first { it.name == "aplite" }
             assertEquals("preview-url", aplite.screenshotImageUrl)

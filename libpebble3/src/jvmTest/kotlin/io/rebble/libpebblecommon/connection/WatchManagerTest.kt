@@ -7,6 +7,7 @@ import io.rebble.libpebblecommon.connection.bt.BluetoothState
 import io.rebble.libpebblecommon.connection.bt.BluetoothStateProvider
 import io.rebble.libpebblecommon.connection.bt.ble.BlePlatformConfig
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.BatteryWatcher
+import io.rebble.libpebblecommon.connection.endpointmanager.FirmwareUpdateTrigger
 import io.rebble.libpebblecommon.connection.endpointmanager.FirmwareUpdater
 import io.rebble.libpebblecommon.connection.endpointmanager.LanguagePackInstallState
 import io.rebble.libpebblecommon.connection.endpointmanager.LanguagePackInstaller
@@ -203,9 +204,9 @@ class WatchManagerTest {
         ) {
         }
 
-        override fun sideloadFirmware(path: Path) {}
+        override fun sideloadFirmware(path: Path, trigger: FirmwareUpdateTrigger) {}
 
-        override fun updateFirmware(update: FirmwareUpdateCheckResult.FoundUpdate) {}
+        override fun updateFirmware(update: FirmwareUpdateCheckResult.FoundUpdate, trigger: FirmwareUpdateTrigger) {}
 
         override fun checkforFirmwareUpdate(force: Boolean) {}
     }
@@ -216,8 +217,7 @@ class WatchManagerTest {
 
         override val state: StateFlow<BluetoothState> = bluetoothState.asStateFlow()
 
-        override val scanningAvailable: StateFlow<Boolean> =
-            MutableStateFlow(true).asStateFlow()
+        override fun scanningAvailable(): Boolean = true
     }
     private val scanning = object : Scanning {
         override val bluetoothEnabled: StateFlow<BluetoothState>
@@ -318,6 +318,8 @@ class WatchManagerTest {
             }
         }
         val analytics = object : LibPebbleAnalytics {
+            override fun incrementHeartbeatCounter(name: String) {}
+
             override fun logEvent(
                 name: String,
                 parameters: Map<String, String>

@@ -64,6 +64,16 @@ class WatchManagerTest {
         override suspend fun insertOrUpdate(watch: KnownWatchItem) {
         }
 
+        override suspend fun insertIfMissing(watches: List<KnownWatchItem>): List<Long> =
+            watches.map { watch ->
+                if (seededKnownWatches.any { it.transportIdentifier == watch.transportIdentifier }) {
+                    -1L
+                } else {
+                    seededKnownWatches += watch
+                    seededKnownWatches.size.toLong()
+                }
+            }
+
         override suspend fun knownWatches(): List<KnownWatchItem> {
             return seededKnownWatches
         }

@@ -17,7 +17,7 @@ class HealthOxygenMigrationTest {
         val dir = Files.createTempDirectory("health-oxygen-migration")
         val path = dir.resolve("test.db").toString()
         val driver = BundledSQLiteDriver()
-        val schema = Json.parseToJsonElement(File("schema/io.rebble.libpebblecommon.database.Database/46.json").readText())
+        val schema = Json.parseToJsonElement(File("schema/io.rebble.libpebblecommon.database.Database/54.json").readText())
         driver.open(path).use { connection ->
             schema.jsonObject.getValue("database").jsonObject.getValue("entities").jsonArray.forEach { entry ->
                 val table = entry.jsonObject
@@ -26,10 +26,10 @@ class HealthOxygenMigrationTest {
             }
             connection.execSQL("INSERT INTO health_data VALUES (1000, 20, 1, 2, 3, 1, 4, 5, 6, 70, 1, 100)")
             connection.execSQL("INSERT INTO AppPrefsEntryEntity (recordHashcode, deleted, sync, id, value) VALUES (17, 0, 1, 'health-migration-sentinel', 'preserved')")
-            connection.execSQL("PRAGMA user_version = 46")
+            connection.execSQL("PRAGMA user_version = 54")
         }
         val database = Room.databaseBuilder<Database>(name = path)
-            .addMigrations(MIGRATION_46_47)
+            .addMigrations(MIGRATION_54_55)
             .setDriver(driver).setQueryCoroutineContext(Dispatchers.IO).build()
         try {
             val dao = database.healthDao()
