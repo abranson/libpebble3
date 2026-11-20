@@ -45,7 +45,7 @@ class FirmwareDownloader(
         type: String,
         validateResponse: ((HttpResponse) -> Boolean)? = null,
     ): Path? {
-        logger.d { "downloadFirmware: $url" }
+        logger.d { "Downloading .$type file" }
         val path = Path(fwDir, "download.$type")
         var complete = false
         return try {
@@ -75,7 +75,7 @@ class FirmwareDownloader(
         } catch (e: Exception) {
             // DNS/socket setup can throw non-IO exceptions; body reads and disk writes can
             // fail too. None of these should cancel the watch's connection scope.
-            logger.w(e) { "Firmware download failed" }
+            logger.w { "Firmware download failed (${e::class.simpleName})" }
             null
         } finally {
             if (!complete) {

@@ -73,7 +73,6 @@ class RealFirmwareUpdateManager(
             )
             else -> result
         }
-        logger.d { "firmwareUpdateAvailable = $firmwareUpdateAvailable" }
         _availableUpdates.value = FirmwareUpdateCheckState(checkingForUpdates = false, result = firmwareUpdateAvailable)
     }
 

@@ -7,6 +7,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.http.Url
 import io.rebble.libpebblecommon.connection.FirmwareUpdateCheckResult
@@ -26,27 +27,28 @@ import kotlin.time.Instant
 import kotlin.uuid.Uuid
 
 /**
- * WebServices backed by public endpoints; everything not implemented yet stays stubbed.
- * Firmware checks: Rebble's cohorts API for classic Pebble hardware (no auth needed; the
- * Rebble token from the UI's setOAuthToken is attached when present), GitHub releases of
- * coredevices/PebbleOS for Core Devices hardware (cohorts doesn't know those; the official
- * app uses Memfault, which needs a private token).
+ * Firmware checks use Rebble cohorts for classic hardware. Core watches use the
+ * signed-in account's OTA track, or public GitHub releases when signed out.
  */
 class RebbleWebServices private constructor(
     private val token: () -> String?,
     private val bootConfig: RebbleBootConfigProvider,
+    private val coreToken: suspend () -> String?,
     private val httpClientProvider: Lazy<HttpClient>,
 ) : WebServices {
+    @JvmOverloads
     constructor(
         token: () -> String?,
         bootConfig: RebbleBootConfigProvider,
-    ) : this(token, bootConfig, lazy(::newRebbleHttpClient))
+        coreToken: suspend () -> String? = { null },
+    ) : this(token, bootConfig, coreToken, lazy(::newRebbleHttpClient))
 
     internal constructor(
         token: () -> String?,
         bootConfig: RebbleBootConfigProvider,
         httpClient: HttpClient,
-    ) : this(token, bootConfig, lazyOf(httpClient))
+        coreToken: suspend () -> String? = { null },
+    ) : this(token, bootConfig, coreToken, lazyOf(httpClient))
 
     private val logger = Logger.withTag("RebbleWebServices")
 
@@ -201,10 +203,44 @@ class RebbleWebServices private constructor(
 
     override suspend fun checkForFirmwareUpdate(watch: WatchInfo, force: Boolean): FirmwareUpdateCheckResult =
         if (watch.platform.isCoreDevicesHardware()) {
-            checkGithubReleases(watch)
+            checkCoreFirmware(watch)
         } else {
             checkCohorts(watch)
         }
+
+    private suspend fun checkCoreFirmware(watch: WatchInfo): FirmwareUpdateCheckResult {
+        try {
+            val bearer = coreToken() ?: return checkGithubReleases(watch)
+            require(bearer.isNotBlank())
+            // Prototype watches share a serial. Match the official client's registration key.
+            val serial = if (watch.serial == "XXXXXXXXXXXX") {
+                "XXXX" + watch.btAddress.split(":").reversed().joinToString("").take(8)
+            } else watch.serial
+            val response = httpClient.get("https://dash.repebble.com/api/ota/latest") {
+                bearerAuth(bearer)
+                parameter("device_serial", serial)
+                parameter("hardware_version", watch.platform.revision)
+                if (!watch.runningFwVersion.isRecovery) {
+                    parameter("current_version", "v" + watch.runningFwVersion.stringVersion.removePrefix("v"))
+                }
+            }
+            if (response.status == HttpStatusCode.NoContent) return FirmwareUpdateCheckResult.FoundNoUpdate
+            check(response.status.isSuccess())
+            val release = json.decodeFromString<CoreFirmwareRelease>(response.bodyAsText())
+            val version = requireNotNull(FirmwareVersion.from(
+                tag = release.version, isRecovery = false, gitHash = "",
+                timestamp = Instant.DISTANT_PAST, isDualSlot = false, isSlot0 = false,
+            ))
+            val url = release.artifacts.first().url
+            val uri = URI(url)
+            require(uri.scheme.equals("https", ignoreCase = true) && uri.host != null && uri.userInfo == null)
+            return FirmwareUpdateCheckResult.FoundUpdate(version, url, release.notes.orEmpty(), installsDirectly = false)
+        } catch (e: Exception) {
+            e.rethrowCancellation()
+            logger.w { "Core firmware check failed" }
+            return FirmwareUpdateCheckResult.UpdateCheckFailed("Failed to check for PebbleOS update")
+        }
+    }
 
     private suspend fun checkCohorts(watch: WatchInfo): FirmwareUpdateCheckResult {
         val response = try {
@@ -330,6 +366,12 @@ private data class SandboxTokenResponse(val token: String? = null)
 private fun WatchHardwarePlatform.isCoreDevicesHardware(): Boolean =
     revision.startsWith("asterix") || revision.startsWith("obelix") ||
         revision.startsWith("getafix")
+
+@Serializable
+private data class CoreFirmwareRelease(val version: String, val artifacts: List<CoreFirmwareArtifact>, val notes: String? = null)
+
+@Serializable
+private data class CoreFirmwareArtifact(val url: String)
 
 @Serializable
 private data class CohortsResponse(val fw: CohortsFirmwareType? = null)

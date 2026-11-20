@@ -464,7 +464,7 @@ class RealFirmwareUpdater(
         requireResume: Boolean,
     ) {
         connectionCoroutineScope.launch {
-            logger.d { "updateFirmware: $update" }
+            logger.d { "updateFirmware: ${update.version.stringVersion}" }
             val fwupProps = props
             if (fwupProps == null) {
                 throw FirmwareUpdateException.SafetyCheckFailed("FirmwareUpdater not initialized")
